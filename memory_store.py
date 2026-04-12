@@ -93,7 +93,80 @@ def get_conn(db_path: str = None) -> sqlite3.Connection:
 
 def init_memory_store(db_path: str = None):
     con = get_conn(db_path)
-    con.executescript(SCHEMA)
+
+    # Crear tablas nuevas (no tocar messages si ya existe)
+    con.executescript("""
+        CREATE TABLE IF NOT EXISTS sessions (
+            session_id   TEXT    PRIMARY KEY,
+            chat_id      INTEGER NOT NULL,
+            start_time   DATETIME NOT NULL,
+            end_time     DATETIME,
+            summary      TEXT,
+            summary_tech TEXT,
+            topics       TEXT,
+            entities     TEXT,
+            tags         TEXT,
+            msg_count    INTEGER DEFAULT 0,
+            summarized   INTEGER DEFAULT 0,
+            created_at   DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS memory_index (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id      INTEGER NOT NULL,
+            session_id   TEXT,
+            msg_id       INTEGER,
+            type         TEXT NOT NULL,
+            title        TEXT,
+            content      TEXT NOT NULL,
+            entities     TEXT,
+            topics       TEXT,
+            tags         TEXT,
+            relevance    REAL DEFAULT 1.0,
+            created_at   DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS person_memory (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id      INTEGER NOT NULL,
+            name         TEXT    NOT NULL,
+            facts        TEXT,
+            last_seen    DATETIME,
+            tags         TEXT,
+            updated_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(chat_id, name)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_sess_chat  ON sessions(chat_id);
+        CREATE INDEX IF NOT EXISTS idx_mem_chat   ON memory_index(chat_id);
+        CREATE INDEX IF NOT EXISTS idx_mem_tags   ON memory_index(tags);
+        CREATE INDEX IF NOT EXISTS idx_person     ON person_memory(chat_id, name);
+    """)
+
+    # Migrar tabla messages: agregar columnas nuevas si no existen
+    existing_cols = [r[1] for r in con.execute("PRAGMA table_info(messages)").fetchall()]
+
+    migrations = [
+        ("session_id",   "ALTER TABLE messages ADD COLUMN session_id TEXT DEFAULT 'legacy'"),
+        ("content_hash", "ALTER TABLE messages ADD COLUMN content_hash TEXT"),
+        ("metadata",     "ALTER TABLE messages ADD COLUMN metadata TEXT"),
+        ("tags",         "ALTER TABLE messages ADD COLUMN tags TEXT"),
+        ("timestamp",    "ALTER TABLE messages ADD COLUMN timestamp DATETIME"),
+    ]
+    for col, sql in migrations:
+        if col not in existing_cols:
+            con.execute(sql)
+
+    # Rellenar timestamp desde ts si existe
+    if "ts" in existing_cols and "timestamp" in [r[1] for r in con.execute("PRAGMA table_info(messages)").fetchall()]:
+        con.execute("UPDATE messages SET timestamp = ts WHERE timestamp IS NULL")
+
+    # Crear índices de messages si no existen
+    con.executescript("""
+        CREATE INDEX IF NOT EXISTS idx_msg_chat ON messages(chat_id, timestamp);
+        CREATE INDEX IF NOT EXISTS idx_msg_sess ON messages(session_id);
+    """)
+
     con.commit()
     con.close()
 
