@@ -75,14 +75,13 @@ FONT_BOLD = _find_font([
     "/usr/share/fonts/truetype/DejaVuSansMono-Bold.ttf",
 ])
 
-def generar_pdf(carta: dict) -> str:
+def generar_pdf(carta: dict, ficha_tecnica: bool = False) -> str:
     if not FONT_REGULAR or not FONT_BOLD:
         raise RuntimeError("Fonts DejaVu no encontrados en el sistema. Instalar fonts-dejavu-mono.")
     pdf = FPDF()
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=15)
 
-    # Fuente Unicode (DejaVu Mono soporta tildes, ñ, °, ℞, ☌, etc.)
     pdf.add_font("Mono",  "",  FONT_REGULAR)
     pdf.add_font("Mono",  "B", FONT_BOLD)
 
@@ -90,11 +89,28 @@ def generar_pdf(carta: dict) -> str:
 
     def fila(txt, bold=False):
         pdf.set_font("Mono", "B" if bold else "", 8)
-        pdf.cell(0, 5, txt, **NL)
+        # Limpiar caracteres problemáticos para PDF
+        txt_clean = txt.encode('latin-1', 'replace').decode('latin-1')
+        pdf.cell(0, 5, txt_clean, **NL)
 
-    # Título
+    if ficha_tecnica:
+        # PDF con ficha técnica completa (8 secciones)
+        import swiss_engine as _e
+        for nombre_p, pd in carta.get("planetas", {}).items():
+            if "error" not in pd:
+                pd["dignidad"]        = _e.calc_dignidad(nombre_p, pd.get("signo", ""))
+                pd["estado_dinamico"] = _e.calc_estado_dinamico(pd.get("speed", 0), nombre_p)
+        carta["regentes"]       = _e.calc_regentes(carta.get("planetas", {}), carta.get("casas", {}))
+        carta["intercepciones"] = _e.calc_intercepciones([c["lon"] for c in carta.get("casas", {}).get("cuspides", [])])
+        carta["jerarquias"]     = _e.calc_jerarquias(carta.get("planetas", {}), carta.get("aspectos", []))
+        contenido = _e.formatear_ficha_tecnica(carta)
+        titulo = "FICHA TECNICA COMPLETA - CARTA NATAL"
+    else:
+        contenido = None
+        titulo = "CARTA NATAL - FICHA TECNICA ESTRUCTURAL"
+
     pdf.set_font("Mono", "B", 13)
-    pdf.cell(0, 8, "CARTA NATAL — FICHA TÉCNICA ESTRUCTURAL", align="C", **NL)
+    pdf.cell(0, 8, titulo, align="C", **NL)
     fila("─" * 95)
 
     d = carta["debug"]
@@ -103,40 +119,43 @@ def generar_pdf(carta: dict) -> str:
     fila(f"Coords: {d['lat']}N  {d['lon']}E   TZ: {d['timezone']}   JD: {d['jd_ut']}")
     fila("─" * 95)
 
-    # Planetas
-    fila("POSICIONES PLANETARIAS", bold=True)
-    fila(f"  {'Planeta':<14} {'Posicion':<24} {'Casa':<10} {'R'}")
-    fila(f"  {'─'*14} {'─'*24} {'─'*10} {'─'}")
-    for nombre, pd in carta["planetas"].items():
-        if "error" in pd:
-            fila(f"  {nombre:<14} [error]")
-            continue
-        r    = "R" if pd["retrogrado"] else " "
-        casa = f"Casa {pd['casa']}"
-        fila(f"  {nombre:<14} {pd['signo']:<24} {casa:<10} {r}")
-
-    fila("─" * 95)
-    fila("ANGULOS", bold=True)
-    c = carta["casas"]
-    fila(f"  ASC: {c['asc']['signo']}   MC: {c['mc']['signo']}   DSC: {c['dc']['signo']}   IC: {c['ic']['signo']}")
-
-    fila("─" * 95)
-    fila("CUSPIDES DE CASAS (Placidus)", bold=True)
-    casas = carta["casas"]["cuspides"]
-    for i in range(0, 12, 3):
-        grupo = casas[i:i+3]
-        txt = "   ".join([f"Casa {c['numero']:2d}: {c['signo']:<22}" for c in grupo])
-        fila("  " + txt)
-
-    fila("─" * 95)
-    fila("ASPECTOS MAYORES (orbe <= 5 grados)", bold=True)
-    if carta["aspectos"]:
-        fila(f"  {'Planeta 1':<14} {'Aspecto':<16} {'Planeta 2':<14} {'Orbe'}")
-        fila(f"  {'─'*14} {'─'*16} {'─'*14} {'─'*6}")
-        for a in carta["aspectos"]:
-            fila(f"  {a['planeta1']:<14} {a['aspecto']:<16} {a['planeta2']:<14} {a['orb']} grados")
+    if ficha_tecnica and contenido:
+        # Volcar el contenido de la ficha completa línea a línea
+        for line in contenido.split("\n"):
+            bold = line.startswith("##") or line.startswith("###")
+            fila(line, bold=bold)
     else:
-        fila("  (Sin aspectos mayores dentro del orbe)")
+        # Ficha simple: planetas, ángulos, cúspides, aspectos
+        fila("POSICIONES PLANETARIAS", bold=True)
+        fila(f"  {'Planeta':<14} {'Posicion':<24} {'Casa':<10} {'R'}")
+        fila(f"  {'─'*14} {'─'*24} {'─'*10} {'─'}")
+        for nombre, pd in carta["planetas"].items():
+            if "error" in pd:
+                fila(f"  {nombre:<14} [error]")
+                continue
+            r    = "R" if pd["retrogrado"] else " "
+            casa = f"Casa {pd['casa']}"
+            fila(f"  {nombre:<14} {pd['signo']:<24} {casa:<10} {r}")
+
+        fila("─" * 95)
+        fila("ANGULOS", bold=True)
+        c = carta["casas"]
+        fila(f"  ASC: {c['asc']['signo']}   MC: {c['mc']['signo']}   DSC: {c['dc']['signo']}   IC: {c['ic']['signo']}")
+
+        fila("─" * 95)
+        fila("CUSPIDES DE CASAS (Placidus)", bold=True)
+        casas = carta["casas"]["cuspides"]
+        for i in range(0, 12, 3):
+            grupo = casas[i:i+3]
+            txt = "   ".join([f"Casa {c['numero']:2d}: {c['signo']:<22}" for c in grupo])
+            fila("  " + txt)
+
+        fila("─" * 95)
+        fila("ASPECTOS MAYORES", bold=True)
+        if carta["aspectos"]:
+            fila(f"  {'Planeta 1':<14} {'Aspecto':<16} {'Planeta 2':<14} {'Orbe'}")
+            for a in carta["aspectos"]:
+                fila(f"  {a['planeta1']:<14} {a['aspecto']:<16} {a['planeta2']:<14} {a['orb']} grados")
 
     pdf.output(PDF_PATH)
     return PDF_PATH
@@ -792,7 +811,8 @@ def ask_claude(chat_id: int, user_text: str) -> tuple:
                                 result = formatear_carta(carta)
                             if block.input.get("generar_pdf", False):
                                 time.sleep(0.5)
-                                pdf_path = generar_pdf(carta)
+                                es_ficha = block.input.get("ficha_tecnica", False)
+                                pdf_path = generar_pdf(carta, ficha_tecnica=es_ficha)
                                 result += "\n\n[PDF generado correctamente]"
                             gc.collect()
                         except Exception as e:
@@ -984,6 +1004,38 @@ def ask_claude(chat_id: int, user_text: str) -> tuple:
             return "No pude generar una respuesta.", pdf_path, extra_files
 
 # ── Handlers Telegram ──────────────────────────────────────────────────────────
+async def send_long_message(bot, chat_id: int, text: str, reply_to=None, chunk_size: int = 3900):
+    """Envía texto largo dividiéndolo en mensajes por secciones o por tamaño."""
+    if len(text) <= chunk_size:
+        chunks = [text]
+    else:
+        # Intentar cortar en saltos de sección (##) o en párrafos
+        parts = []
+        current = ""
+        for line in text.split("\n"):
+            # Si agregar esta línea supera el límite, guardar chunk actual
+            if len(current) + len(line) + 1 > chunk_size and current:
+                parts.append(current.strip())
+                current = ""
+            current += line + "\n"
+        if current.strip():
+            parts.append(current.strip())
+        chunks = parts if parts else [text[:chunk_size]]
+
+    for i, chunk in enumerate(chunks):
+        try:
+            if reply_to and i == 0:
+                await reply_to.reply_text(chunk)
+            else:
+                await bot.send_message(chat_id=chat_id, text=chunk)
+        except Exception:
+            import re
+            plain = re.sub(r'[*_`\[\]()~>#+\-=|{}.!]', '', chunk)
+            if reply_to and i == 0:
+                await reply_to.reply_text(plain)
+            else:
+                await bot.send_message(chat_id=chat_id, text=plain)
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     import asyncio, io, threading, queue
     chat_id  = update.effective_chat.id
@@ -1027,12 +1079,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply, pdf_path, extra_files = payload
         save_message_full(chat_id, "user",      user_msg, db_path=DB_PATH)
         save_message_full(chat_id, "assistant", reply,    db_path=DB_PATH)
-        try:
-            await update.message.reply_text(reply)
-        except Exception:
-            import re
-            plain = re.sub(r'[*_`\[\]()~>#+\-=|{}.!]', '', reply)
-            await update.message.reply_text(plain)
+        await send_long_message(context.bot, chat_id, reply, reply_to=update.message)
 
         if pdf_path:
             await context.bot.send_chat_action(chat_id=chat_id, action="upload_document")
@@ -1134,12 +1181,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply, pdf_path, extra_files = payload
         save_message_full(chat_id, "user",      texto, db_path=DB_PATH)
         save_message_full(chat_id, "assistant", reply, db_path=DB_PATH)
-        try:
-            await update.message.reply_text(reply)
-        except Exception:
-            import re
-            plain = re.sub(r'[*_`\[\]()~>#+\-=|{}.!]', '', reply)
-            await update.message.reply_text(plain)
+        await send_long_message(context.bot, chat_id, reply, reply_to=update.message)
 
         if pdf_path:
             await context.bot.send_chat_action(chat_id=chat_id, action="upload_document")
