@@ -13,8 +13,8 @@ import anthropic
 from ddgs import DDGS
 from fpdf import FPDF
 from fpdf.enums import XPos, YPos
-from telegram import Update
-from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, ContextTypes, filters
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, ContextTypes, filters, CallbackQueryHandler
 from swiss_engine import calc_carta_completa, formatear_ficha, verificar_carta, calc_houses, assign_planet_house, formatear_ficha_tecnica, calc_dignidad, calc_estado_dinamico, calc_regentes, calc_intercepciones, calc_jerarquias
 
 # ── Configuración ──────────────────────────────────────────────────────────────
@@ -566,6 +566,7 @@ ASTROLOGÍA:
 - Si pide listar perfiles guardados, usás astro_listar_perfiles.
 - Si pide borrar un perfil, usás astro_eliminar_perfil.
 - Cuando el usuario pida una ficha tecnica astrologica completa, usa calcular_carta_natal con ficha_tecnica=true. Esto devuelve el analisis tecnico completo con secciones 0-8. NO resumir, NO interpretar, mostrar el output completo tal como viene.
+- Si el usuario pide lista de cartas, menu, ver cartas o /cartas, llama a la tool astro_listar_perfiles y presenta los perfiles de forma conversacional. No uses botones desde Claude, esos se manejan por separado.
 
 REGLA FUNDAMENTAL:
 Si mostraste un menú o lista, igual aceptás que el usuario siga hablando normal. La conversación siempre fluye.
@@ -940,6 +941,106 @@ async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     clear_history(update.effective_chat.id)
     await update.message.reply_text("Historial borrado, empezamos de cero.")
 
+# ── Menú inline de cartas astrológicas ────────────────────────────────────────
+async def menu_lista_cartas(update_or_query, context, chat_id):
+    perfiles = astro_listar(chat_id)
+    if not perfiles:
+        texto = "No hay cartas guardadas. Podés pedirme que calcule una."
+        if hasattr(update_or_query, "message") and update_or_query.message:
+            await update_or_query.message.reply_text(texto)
+        else:
+            await update_or_query.edit_message_text(texto)
+        return
+    botones = [
+        [InlineKeyboardButton(p["nombre"].title(), callback_data=f"astro:ver:{p['nombre']}")]
+        for p in perfiles
+    ]
+    botones.append([InlineKeyboardButton("Cerrar menú", callback_data="astro:cerrar")])
+    teclado = InlineKeyboardMarkup(botones)
+    if hasattr(update_or_query, "message") and update_or_query.message:
+        await update_or_query.message.reply_text("¿De quién querés ver la carta?", reply_markup=teclado)
+    else:
+        await update_or_query.edit_message_text("¿De quién querés ver la carta?", reply_markup=teclado)
+
+async def menu_opciones_persona(query, nombre):
+    botones = [
+        [InlineKeyboardButton("Ficha técnica natal",    callback_data=f"astro:natal:{nombre}")],
+        [InlineKeyboardButton("Ficha técnica completa", callback_data=f"astro:ficha:{nombre}")],
+        [InlineKeyboardButton("Tránsitos actuales",     callback_data=f"astro:transitos:{nombre}")],
+        [InlineKeyboardButton("Volver",                 callback_data="astro:list")],
+    ]
+    teclado = InlineKeyboardMarkup(botones)
+    await query.edit_message_text(f"¿Qué querés de {nombre.title()}?", reply_markup=teclado)
+
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    chat_id = query.message.chat_id
+    data = query.data
+
+    if data == "astro:list":
+        await menu_lista_cartas(query, context, chat_id)
+
+    elif data.startswith("astro:ver:"):
+        nombre = data.split(":", 2)[2]
+        await menu_opciones_persona(query, nombre)
+
+    elif data.startswith("astro:natal:") or data.startswith("astro:ficha:"):
+        nombre = data.split(":", 2)[2]
+        ficha_tecnica = data.startswith("astro:ficha:")
+        await query.edit_message_text(f"Calculando carta de {nombre.title()}...")
+        datos = astro_recuperar(chat_id, nombre)
+        if not datos:
+            await query.edit_message_text(f"No encontré carta guardada para {nombre}.")
+            return
+        import threading, queue as q_mod
+        q = q_mod.Queue()
+
+        def run():
+            try:
+                import swiss_engine as e
+                carta = e.calc_carta_completa(datos["fecha"], datos["hora"], datos["lugar"])
+                if ficha_tecnica:
+                    for n, d in carta["planetas"].items():
+                        if "error" not in d:
+                            d["dignidad"] = e.calc_dignidad(n, d["signo"])
+                            d["estado_dinamico"] = e.calc_estado_dinamico(d["speed"], n)
+                    carta["regentes"] = e.calc_regentes(carta["planetas"], carta["casas"])
+                    result = e.formatear_ficha_tecnica(carta)
+                else:
+                    result = e.formatear_ficha(carta)
+                q.put(("ok", result))
+            except Exception as ex:
+                q.put(("err", str(ex)))
+
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+        import asyncio
+        elapsed = 0
+        while t.is_alive() and elapsed < 90:
+            await asyncio.sleep(4)
+            elapsed += 4
+        if t.is_alive():
+            await context.bot.send_message(chat_id=chat_id, text="Tardo demasiado, intentalo de nuevo.")
+            return
+        status, payload = q.get_nowait()
+        if status == "err":
+            await context.bot.send_message(chat_id=chat_id, text=f"Error: {payload}")
+        else:
+            MAX = 4000
+            for i in range(0, len(payload), MAX):
+                await context.bot.send_message(chat_id=chat_id, text=payload[i:i+MAX])
+
+    elif data.startswith("astro:transitos:"):
+        nombre = data.split(":", 2)[2]
+        await query.edit_message_text(f"Transitos actuales para {nombre.title()} — funcion en desarrollo.")
+
+    elif data == "astro:cerrar":
+        await query.edit_message_text("Menu cerrado.")
+
+async def cmd_cartas(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await menu_lista_cartas(update, context, update.effective_chat.id)
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     init_db()
@@ -947,6 +1048,8 @@ if __name__ == "__main__":
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("reset", cmd_reset))
+    app.add_handler(CommandHandler("cartas", cmd_cartas))
+    app.add_handler(CallbackQueryHandler(handle_callback, pattern="^astro:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
     log.info("✅ Bot en línea.")
