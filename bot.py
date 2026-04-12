@@ -16,11 +16,13 @@ from fpdf.enums import XPos, YPos
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, ContextTypes, filters, CallbackQueryHandler
 from swiss_engine import calc_carta_completa, formatear_ficha, verificar_carta, calc_houses, assign_planet_house, formatear_ficha_tecnica, calc_dignidad, calc_estado_dinamico, calc_regentes, calc_intercepciones, calc_jerarquias
+from config_store import init_config_store, seed_initial_configs, save_config, get_config, get_config_meta, list_configs, load_all_active
 
 # ── Configuración ──────────────────────────────────────────────────────────────
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 ANTHROPIC_KEY  = os.environ["ANTHROPIC_KEY"]
 DB_PATH        = os.environ.get("DB_PATH",  "/data/memory.db")
+SYSTEM_CONFIG  = {}  # se carga desde DB al arrancar
 EPHE_PATH      = os.environ.get("EPHE_PATH", "/app/ephe")
 PDF_PATH       = os.environ.get("PDF_PATH",  "/tmp/carta.pdf")
 MAX_HISTORY    = 20
@@ -142,6 +144,8 @@ def init_db():
     """)
     con.commit()
     con.close()
+    init_config_store(DB_PATH)
+    seed_initial_configs(db_path=DB_PATH)
 
 def astro_guardar(chat_id: int, nombre: str, fecha: str, hora: str, lugar: str, carta: dict) -> str:
     import json
@@ -502,6 +506,42 @@ TOOLS = [
         }
     },
     {
+        'name': 'config_guardar',
+        'description': 'Guarda una configuración persistente en Railway DB. Usá cuando el usuario diga guardar, dejar fijo, usar como regla, a partir de ahora, este es el template, esta config queda.',
+        'input_schema': {
+            'type': 'object',
+            'properties': {
+                'namespace': {'type': 'string', 'description': 'Namespace: astrology, telegram, prompts, technical, menus, templates'},
+                'key': {'type': 'string', 'description': 'Clave única dentro del namespace'},
+                'value': {'type': 'string', 'description': 'Valor a guardar (texto o JSON serializado)'},
+                'description': {'type': 'string', 'description': 'Descripción de qué es esta configuración'}
+            },
+            'required': ['namespace', 'key', 'value']
+        }
+    },
+    {
+        'name': 'config_leer',
+        'description': 'Lee una configuración persistente desde Railway DB.',
+        'input_schema': {
+            'type': 'object',
+            'properties': {
+                'namespace': {'type': 'string'},
+                'key': {'type': 'string'}
+            },
+            'required': ['namespace', 'key']
+        }
+    },
+    {
+        'name': 'config_listar',
+        'description': 'Lista todas las configuraciones guardadas en Railway DB, opcionalmente filtradas por namespace.',
+        'input_schema': {
+            'type': 'object',
+            'properties': {
+                'namespace': {'type': 'string', 'description': 'Filtrar por namespace (opcional)'}
+            }
+        }
+    },
+    {
         "name": "calendar_crear",
         "description": "Crea un nuevo evento en el Google Calendar del usuario.",
         "input_schema": {
@@ -518,7 +558,9 @@ TOOLS = [
     }
 ]
 
-SYSTEM_PROMPT = """Sos un asistente conversacional integrado a Telegram. Respondés como una persona real con estilo relajado, canchero y seguro, inspirado en un perfil de zona norte de Buenos Aires, con un toque de humor tipo The Big Lebowski: irónico, liviano, medio descontracturado, sin exagerar.
+SYSTEM_PROMPT = """CONFIGURACION PERSISTENTE: Tenés acceso a Railway DB para guardar y leer configuraciones. Cuando el usuario diga guardar, dejar fijo, a partir de ahora, esta es la regla, etc., usá config_guardar automáticamente. Cuando el usuario pida ver configs, usá config_listar o config_leer. La DB es la fuente de verdad.
+
+Sos un asistente conversacional integrado a Telegram. Respondés como una persona real con estilo relajado, canchero y seguro, inspirado en un perfil de zona norte de Buenos Aires, con un toque de humor tipo The Big Lebowski: irónico, liviano, medio descontracturado, sin exagerar.
 
 FECHA DE HOY: {{FECHA_HOY}}. Usala siempre para armar queries de búsqueda con el año correcto.
 
@@ -740,6 +782,51 @@ def ask_claude(chat_id: int, user_text: str) -> tuple:
                         except Exception as e:
                             result = f"Error creando evento: {e}"
                             log.error(f"Calendar crear error: {e}")
+
+                    elif block.name == 'config_guardar':
+                        try:
+                            import json as _json
+                            val = block.input['value']
+                            try:
+                                val = _json.loads(val)
+                            except Exception:
+                                pass
+                            meta = save_config(
+                                block.input['namespace'],
+                                block.input['key'],
+                                val,
+                                block.input.get('description', ''),
+                                db_path=DB_PATH
+                            )
+                            result = f'Guardado en Railway DB:\n  namespace: {meta["namespace"]}\n  key: {meta["key"]}\n  version: {meta["version"]}'
+                            log.info(f'Config guardada: {meta}')
+                        except Exception as e:
+                            result = f'Error guardando config: {e}'
+
+                    elif block.name == 'config_leer':
+                        try:
+                            meta = get_config_meta(block.input['namespace'], block.input['key'], db_path=DB_PATH)
+                            if not meta:
+                                result = f'No encontré config: {block.input["namespace"]}.{block.input["key"]}'
+                            else:
+                                import json as _json
+                                result = f'Config {meta["namespace"]}.{meta["key"]} v{meta["version"]}:\n{_json.dumps(meta["value"], ensure_ascii=False, indent=2) if isinstance(meta["value"], (dict,list)) else meta["value"]}'
+                        except Exception as e:
+                            result = f'Error leyendo config: {e}'
+
+                    elif block.name == 'config_listar':
+                        try:
+                            ns = block.input.get('namespace')
+                            configs = list_configs(ns, db_path=DB_PATH)
+                            if not configs:
+                                result = 'No hay configs guardadas.'
+                            else:
+                                lines = [f'Configs en Railway DB ({len(configs)}):']
+                                for c in configs:
+                                    lines.append(f'  {c["namespace"]}.{c["key"]} v{c["version"]} — {(c["description"] or "")[:50]}')
+                                result = '\n'.join(lines)
+                        except Exception as e:
+                            result = f'Error listando configs: {e}'
 
                     else:
                         result = "Herramienta no reconocida."
@@ -1044,6 +1131,8 @@ async def cmd_cartas(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ── Main ───────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     init_db()
+    SYSTEM_CONFIG = load_all_active(DB_PATH)
+    log.info(f'Config cargada: {len(SYSTEM_CONFIG)} entradas desde Railway DB')
     log.info("🤖 CukinatorBot iniciando con motor astrológico...")
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", cmd_start))
