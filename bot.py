@@ -765,10 +765,10 @@ def ask_claude(chat_id: int, user_text: str) -> tuple:
                             if block.input.get("ficha_tecnica", False):
                                 for nombre_p, pd in carta.get("planetas", {}).items():
                                     if "error" not in pd:
-                                        pd["dignidad"]      = calc_dignidad(nombre_p, pd.get("signo", ""))
-                                        pd["estado_din"]    = calc_estado_dinamico(pd.get("speed", 0), nombre_p)
+                                        pd["dignidad"]       = calc_dignidad(nombre_p, pd.get("signo", ""))
+                                        pd["estado_dinamico"] = calc_estado_dinamico(pd.get("speed", 0), nombre_p)
                                 carta["regentes"]       = calc_regentes(carta.get("planetas", {}), carta.get("casas", {}))
-                                carta["intercepciones"] = calc_intercepciones([c["grados"] for c in carta.get("casas", {}).get("cuspides", [])])
+                                carta["intercepciones"] = calc_intercepciones([c["lon"] for c in carta.get("casas", {}).get("cuspides", [])])
                                 carta["jerarquias"]     = calc_jerarquias(carta.get("planetas", {}), carta.get("aspectos", []))
                                 result = formatear_ficha_tecnica(carta)
                             else:
