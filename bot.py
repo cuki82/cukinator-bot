@@ -2,16 +2,12 @@ import sqlite3
 import logging
 import json
 import datetime
-import math
 import sys
 import os
 
 import os
 import tempfile
 import swisseph as swe
-from geopy.geocoders import Nominatim
-from timezonefinder import TimezoneFinder
-import pytz
 import whisper
 import anthropic
 from ddgs import DDGS
@@ -19,6 +15,7 @@ from fpdf import FPDF
 from fpdf.enums import XPos, YPos
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, ContextTypes, filters
+from swiss_engine import calc_carta_completa, formatear_ficha, verificar_carta, calc_houses, assign_planet_house, formatear_ficha_tecnica, calc_dignidad, calc_estado_dinamico, calc_regentes, calc_intercepciones, calc_jerarquias
 
 # ── Configuración ──────────────────────────────────────────────────────────────
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
@@ -27,7 +24,6 @@ DB_PATH        = os.environ.get("DB_PATH",  "/data/memory.db")
 EPHE_PATH      = os.environ.get("EPHE_PATH", "/app/ephe")
 PDF_PATH       = os.environ.get("PDF_PATH",  "/tmp/carta.pdf")
 MAX_HISTORY    = 20
-MOSH           = swe.FLG_MOSEPH
 GAS_URL        = os.environ["GAS_URL"]
 
 swe.set_ephe_path(EPHE_PATH)
@@ -36,88 +32,6 @@ swe.set_ephe_path(EPHE_PATH)
 logging.basicConfig(format="%(asctime)s [%(levelname)s] %(message)s", level=logging.INFO)
 log = logging.getLogger(__name__)
 
-# ── Constantes astrológicas ────────────────────────────────────────────────────
-PLANETAS = [
-    (swe.SUN,      "Sol"),
-    (swe.MOON,     "Luna"),
-    (swe.MERCURY,  "Mercurio"),
-    (swe.VENUS,    "Venus"),
-    (swe.MARS,     "Marte"),
-    (swe.JUPITER,  "Júpiter"),
-    (swe.SATURN,   "Saturno"),
-    (swe.URANUS,   "Urano"),
-    (swe.NEPTUNE,  "Neptuno"),
-    (swe.PLUTO,    "Plutón"),
-    (swe.MEAN_NODE,"Nodo N."),
-    (swe.CHIRON,   "Quirón"),
-]
-
-SIGNOS = ["Aries","Tauro","Géminis","Cáncer","Leo","Virgo",
-          "Libra","Escorpio","Sagitario","Capricornio","Acuario","Piscis"]
-
-ASPECTOS_DEF = [
-    (0,   "Conjunción", "☌"),
-    (60,  "Sextil",     "⚹"),
-    (90,  "Cuadratura", "□"),
-    (120, "Trígono",    "△"),
-    (180, "Oposición",  "☍"),
-]
-
-ORB = 5.0
-
-# ── Helpers astrológicos ───────────────────────────────────────────────────────
-def grado_a_signo(lon: float) -> str:
-    lon = lon % 360
-    signo = SIGNOS[int(lon // 30)]
-    g = lon % 30
-    return f"{signo} {int(g):02d}°{int((g % 1) * 60):02d}'"
-
-def diferencia_angular(a: float, b: float) -> float:
-    diff = abs(a - b) % 360
-    return min(diff, 360 - diff)
-
-def planeta_en_casa(lon_planeta: float, cuspides: list) -> int:
-    """
-    Devuelve el número de casa (1-12) en que cae lon_planeta.
-    cuspides: lista de 12 longitudes eclípticas (grados) de cada cúspide.
-    Maneja el wraparound de 360°.
-
-    Ejemplo rápido:
-      lon_planeta = 200
-      cuspides = [180, 210, 240, 270, 300, 330, 0, 30, 60, 90, 120, 150]
-      → Casa 1  (200° está entre la cúspide 1 en 180° y la cúspide 2 en 210°)
-    """
-    lon = lon_planeta % 360
-    for i in range(12):
-        inicio = cuspides[i] % 360
-        fin    = cuspides[(i + 1) % 12] % 360
-        if inicio <= fin:
-            if inicio <= lon < fin:
-                return i + 1
-        else:  # el segmento cruza el 0°/360°
-            if lon >= inicio or lon < fin:
-                return i + 1
-    return 1  # fallback (nunca debería llegar aquí)
-
-def calcular_aspectos(posiciones: dict) -> list:
-    nombres = list(posiciones.keys())
-    resultado = []
-    for i in range(len(nombres)):
-        for j in range(i + 1, len(nombres)):
-            n1, n2 = nombres[i], nombres[j]
-            diff = diferencia_angular(posiciones[n1], posiciones[n2])
-            for angulo, nombre_asp, simbolo in ASPECTOS_DEF:
-                orb_real = abs(diff - angulo)
-                if orb_real <= ORB:
-                    resultado.append({
-                        "planeta1": n1,
-                        "planeta2": n2,
-                        "aspecto": nombre_asp,
-                        "simbolo": simbolo,
-                        "orb": round(orb_real, 2),
-                        "angulo": angulo,
-                    })
-    return resultado
 
 # ── Motor principal de carta natal ────────────────────────────────────────────
 def calcular_carta(fecha: str, hora: str, lugar: str) -> dict:
@@ -125,124 +39,12 @@ def calcular_carta(fecha: str, hora: str, lugar: str) -> dict:
     fecha: 'DD/MM/AAAA'
     hora:  'HH:MM'
     lugar: nombre de ciudad
+    Delega en swiss_engine.calc_carta_completa().
     """
-    # Geocodificación
-    geo = Nominatim(user_agent="cukinator_astro")
-    loc = geo.geocode(lugar, language="es", timeout=10)
-    if not loc:
-        raise ValueError(f"No pude encontrar el lugar: {lugar}")
-    lat, lon = loc.latitude, loc.longitude
-    lugar_nombre = loc.address
-
-    # Timezone
-    tf = TimezoneFinder()
-    tz_name = tf.timezone_at(lat=lat, lng=lon) or "UTC"
-    tz = pytz.timezone(tz_name)
-
-    # Parsear fecha/hora local
-    dt_local = datetime.datetime.strptime(f"{fecha} {hora}", "%d/%m/%Y %H:%M")
-    dt_local = tz.localize(dt_local)
-    dt_ut = dt_local.astimezone(pytz.utc)
-
-    # Día Juliano
-    jd = swe.julday(dt_ut.year, dt_ut.month, dt_ut.day,
-                    dt_ut.hour + dt_ut.minute / 60.0 + dt_ut.second / 3600.0)
-
-    # Calcular planetas
-    planetas_data = {}
-    for pid, nombre in PLANETAS:
-        try:
-            pos, _ = swe.calc_ut(jd, pid, MOSH)
-            retrogrado = pos[3] < 0
-            planetas_data[nombre] = {
-                "lon": pos[0],
-                "signo": grado_a_signo(pos[0]),
-                "retrogrado": retrogrado,
-            }
-        except Exception as e:
-            log.warning(f"No se pudo calcular {nombre}: {e}")
-
-    # Casas (Placidus)
-    cuspides_raw, ascmc = swe.houses(jd, lat, lon, b'P')
-    casas = [{"numero": i+1, "lon": c, "signo": grado_a_signo(c)}
-             for i, c in enumerate(cuspides_raw)]
-
-    # Asignar cada planeta a su casa
-    cuspides_lon = [c["lon"] for c in casas]
-    for d in planetas_data.values():
-        d["casa"] = planeta_en_casa(d["lon"], cuspides_lon)
-
-    asc = {"lon": ascmc[0], "signo": grado_a_signo(ascmc[0])}
-    mc  = {"lon": ascmc[1], "signo": grado_a_signo(ascmc[1])}
-    ic  = {"lon": (ascmc[1] + 180) % 360, "signo": grado_a_signo((ascmc[1] + 180) % 360)}
-    dc  = {"lon": (ascmc[0] + 180) % 360, "signo": grado_a_signo((ascmc[0] + 180) % 360)}
-
-    # Aspectos
-    pos_para_aspectos = {n: d["lon"] for n, d in planetas_data.items()}
-    aspectos = calcular_aspectos(pos_para_aspectos)
-
-    return {
-        "fecha": fecha,
-        "hora": hora,
-        "lugar": lugar_nombre,
-        "lat": round(lat, 4),
-        "lon": round(lon, 4),
-        "timezone": tz_name,
-        "hora_ut": dt_ut.strftime("%H:%M UT"),
-        "jd": round(jd, 4),
-        "planetas": planetas_data,
-        "casas": casas,
-        "asc": asc,
-        "mc": mc,
-        "ic": ic,
-        "dc": dc,
-        "aspectos": aspectos,
-    }
+    return calc_carta_completa(fecha, hora, lugar)
 
 def formatear_carta(carta: dict) -> str:
-    lines = []
-    lines.append("╔══════════════════════════════════════════╗")
-    lines.append("║         CARTA NATAL — FICHA TÉCNICA      ║")
-    lines.append("╚══════════════════════════════════════════╝")
-    lines.append(f"  Fecha  : {carta['fecha']}  |  Hora local: {carta['hora']}")
-    lines.append(f"  Lugar  : {carta['lugar']}")
-    lines.append(f"  Coords : {carta['lat']}° N  {carta['lon']}° E")
-    lines.append(f"  TZ     : {carta['timezone']}  |  {carta['hora_ut']}")
-    lines.append(f"  JD     : {carta['jd']}")
-    lines.append("")
-
-    lines.append("── POSICIONES PLANETARIAS ─────────────────")
-    lines.append(f"  {'Planeta':<12} {'Posición':<22} {'Casa':<8} {'R'}")
-    lines.append(f"  {'─'*12} {'─'*22} {'─'*8} {'─'}")
-    for nombre, d in carta["planetas"].items():
-        r    = "℞" if d["retrogrado"] else " "
-        casa = f"Casa {d['casa']}"
-        lines.append(f"  {nombre:<12} {d['signo']:<22} {casa:<8} {r}")
-    lines.append("")
-
-    lines.append("── ÁNGULOS ────────────────────────────────")
-    lines.append(f"  ASC (Asc)  : {carta['asc']['signo']}")
-    lines.append(f"  MC  (Med.) : {carta['mc']['signo']}")
-    lines.append(f"  DSC (Des.) : {carta['dc']['signo']}")
-    lines.append(f"  IC         : {carta['ic']['signo']}")
-    lines.append("")
-
-    lines.append("── CÚSPIDES DE CASAS (Placidus) ───────────")
-    for c in carta["casas"]:
-        lines.append(f"  Casa {c['numero']:2d}  : {c['signo']}")
-    lines.append("")
-
-    lines.append("── ASPECTOS MAYORES (orbe ≤5°) ────────────")
-    if carta["aspectos"]:
-        lines.append(f"  {'Planeta 1':<12} {'Asp':^12} {'Planeta 2':<12} {'Orbe'}")
-        lines.append(f"  {'─'*12} {'─'*12} {'─'*12} {'─'*5}")
-        for a in carta["aspectos"]:
-            asp_txt = f"{a['simbolo']} {a['aspecto']}"
-            lines.append(f"  {a['planeta1']:<12} {asp_txt:<12} {a['planeta2']:<12} {a['orb']}°")
-    else:
-        lines.append("  (Sin aspectos mayores dentro del orbe)")
-
-    return "\n".join(lines)
+    return formatear_ficha(carta)
 
 # ── Generador de PDF ───────────────────────────────────────────────────────────
 FONT_REGULAR = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
@@ -268,27 +70,32 @@ def generar_pdf(carta: dict) -> str:
     pdf.cell(0, 8, "CARTA NATAL — FICHA TÉCNICA ESTRUCTURAL", align="C", **NL)
     fila("─" * 95)
 
-    fila(f"Fecha : {carta['fecha']}   Hora local: {carta['hora']}   {carta['hora_ut']}")
-    fila(f"Lugar : {carta['lugar']}")
-    fila(f"Coords: {carta['lat']}N  {carta['lon']}E   TZ: {carta['timezone']}   JD: {carta['jd']}")
+    d = carta["debug"]
+    fila(f"Fecha : {d['fecha_original']}   {d['hora_ut']}")
+    fila(f"Lugar : {d['lugar_geocodificado'][:80]}")
+    fila(f"Coords: {d['lat']}N  {d['lon']}E   TZ: {d['timezone']}   JD: {d['jd_ut']}")
     fila("─" * 95)
 
     # Planetas
     fila("POSICIONES PLANETARIAS", bold=True)
     fila(f"  {'Planeta':<14} {'Posicion':<24} {'Casa':<10} {'R'}")
     fila(f"  {'─'*14} {'─'*24} {'─'*10} {'─'}")
-    for nombre, d in carta["planetas"].items():
-        r    = "R" if d["retrogrado"] else " "
-        casa = f"Casa {d['casa']}"
-        fila(f"  {nombre:<14} {d['signo']:<24} {casa:<10} {r}")
+    for nombre, pd in carta["planetas"].items():
+        if "error" in pd:
+            fila(f"  {nombre:<14} [error]")
+            continue
+        r    = "R" if pd["retrogrado"] else " "
+        casa = f"Casa {pd['casa']}"
+        fila(f"  {nombre:<14} {pd['signo']:<24} {casa:<10} {r}")
 
     fila("─" * 95)
     fila("ANGULOS", bold=True)
-    fila(f"  ASC: {carta['asc']['signo']}   MC: {carta['mc']['signo']}   DSC: {carta['dc']['signo']}   IC: {carta['ic']['signo']}")
+    c = carta["casas"]
+    fila(f"  ASC: {c['asc']['signo']}   MC: {c['mc']['signo']}   DSC: {c['dc']['signo']}   IC: {c['ic']['signo']}")
 
     fila("─" * 95)
     fila("CUSPIDES DE CASAS (Placidus)", bold=True)
-    casas = carta["casas"]
+    casas = carta["casas"]["cuspides"]
     for i in range(0, 12, 3):
         grupo = casas[i:i+3]
         txt = "   ".join([f"Casa {c['numero']:2d}: {c['signo']:<22}" for c in grupo])
@@ -577,7 +384,8 @@ TOOLS = [
                 "fecha":       {"type": "string", "description": "Fecha de nacimiento en formato DD/MM/AAAA"},
                 "hora":        {"type": "string", "description": "Hora de nacimiento en formato HH:MM (hora local)"},
                 "lugar":       {"type": "string", "description": "Ciudad y país de nacimiento"},
-                "generar_pdf": {"type": "boolean", "description": "Si se debe generar un PDF con la ficha. Default false."}
+                "generar_pdf":   {"type": "boolean", "description": "Si se debe generar un PDF con la ficha. Default false."},
+                "ficha_tecnica": {"type": "boolean", "description": "Si es true, devuelve la ficha técnica completa con secciones 0-8 (dignidades, estados, regentes, intercepciones, jerarquías). Default false."}
             },
             "required": ["fecha", "hora", "lugar"]
         }
@@ -757,6 +565,7 @@ ASTROLOGÍA:
 - Si pide ver la carta de alguien, usás astro_ver_perfil.
 - Si pide listar perfiles guardados, usás astro_listar_perfiles.
 - Si pide borrar un perfil, usás astro_eliminar_perfil.
+- Cuando el usuario pida una ficha tecnica astrologica completa, usa calcular_carta_natal con ficha_tecnica=true. Esto devuelve el analisis tecnico completo con secciones 0-8. NO resumir, NO interpretar, mostrar el output completo tal como viene.
 
 REGLA FUNDAMENTAL:
 Si mostraste un menú o lista, igual aceptás que el usuario siga hablando normal. La conversación siempre fluye.
@@ -855,7 +664,17 @@ def ask_claude(chat_id: int, user_text: str) -> tuple:
                             import time, gc
                             carta = calcular_carta(block.input["fecha"], block.input["hora"], block.input["lugar"])
                             time.sleep(0.5)
-                            result = formatear_carta(carta)
+                            if block.input.get("ficha_tecnica", False):
+                                for nombre_p, pd in carta.get("planetas", {}).items():
+                                    if "error" not in pd:
+                                        pd["dignidad"]      = calc_dignidad(nombre_p, pd.get("signo", ""))
+                                        pd["estado_din"]    = calc_estado_dinamico(pd.get("speed", 0), nombre_p)
+                                carta["regentes"]       = calc_regentes(carta.get("planetas", {}), carta.get("casas", {}))
+                                carta["intercepciones"] = calc_intercepciones([c["grados"] for c in carta.get("casas", {}).get("cuspides", [])])
+                                carta["jerarquias"]     = calc_jerarquias(carta.get("planetas", {}), carta.get("aspectos", []))
+                                result = formatear_ficha_tecnica(carta)
+                            else:
+                                result = formatear_carta(carta)
                             if block.input.get("generar_pdf", False):
                                 time.sleep(0.5)
                                 pdf_path = generar_pdf(carta)
