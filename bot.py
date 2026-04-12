@@ -1050,10 +1050,12 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Transcribir con subproceso async nativo (no bloquea el event loop)
         log.info(f"[{chat_id}] Transcribiendo audio de {name}...")
+        _bot_dir = os.path.dirname(os.path.abspath(__file__))
+        _transcribe_script = os.path.join(_bot_dir, "transcribe.py")
 
         try:
             proc = await asyncio.create_subprocess_exec(
-                sys.executable, "/opt/cukinator/transcribe.py", tmp_path,
+                sys.executable, _transcribe_script, tmp_path,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
