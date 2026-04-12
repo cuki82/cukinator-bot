@@ -24,7 +24,12 @@ from memory_store import (init_memory_store, save_message_full, get_history_full
 # ── Configuración ──────────────────────────────────────────────────────────────
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 ANTHROPIC_KEY  = os.environ["ANTHROPIC_KEY"]
-DB_PATH        = os.environ.get("DB_PATH",  "/data/memory.db")
+_db_default = "/data/memory.db"
+try:
+    os.makedirs("/data", exist_ok=True)
+except Exception:
+    _db_default = "/tmp/memory.db"
+DB_PATH        = os.environ.get("DB_PATH", _db_default)
 SYSTEM_CONFIG  = {}  # se carga desde DB al arrancar
 EPHE_PATH      = os.environ.get("EPHE_PATH", "/app/ephe")
 PDF_PATH       = os.environ.get("PDF_PATH",  "/tmp/carta.pdf")
@@ -1248,10 +1253,18 @@ async def cmd_cartas(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    init_db()
-    SYSTEM_CONFIG = load_all_active(DB_PATH)
-    log.info(f'Config cargada: {len(SYSTEM_CONFIG)} entradas desde Railway DB')
-    log.info("🤖 CukinatorBot iniciando con motor astrológico...")
+    try:
+        init_db()
+        log.info(f"DB inicializada en: {DB_PATH}")
+    except Exception as e:
+        log.error(f"Error init_db: {e}")
+    try:
+        SYSTEM_CONFIG = load_all_active(DB_PATH)
+        log.info(f'Config cargada: {len(SYSTEM_CONFIG)} entradas desde Railway DB')
+    except Exception as e:
+        SYSTEM_CONFIG = {}
+        log.warning(f"No se pudo cargar config: {e}")
+    log.info("🤖 CukinatorBot iniciando...")
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("reset", cmd_reset))
