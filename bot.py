@@ -17,6 +17,9 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, ContextTypes, filters, CallbackQueryHandler
 from swiss_engine import calc_carta_completa, formatear_ficha, verificar_carta, calc_houses, assign_planet_house, formatear_ficha_tecnica, calc_dignidad, calc_estado_dinamico, calc_regentes, calc_intercepciones, calc_jerarquias
 from config_store import init_config_store, seed_initial_configs, save_config, get_config, get_config_meta, list_configs, load_all_active
+from memory_store import (init_memory_store, save_message_full, get_history_full,
+    get_sessions, search_memory, search_person_memory, save_memory_fact,
+    upsert_person_memory, get_memory_stats, needs_summary, clear_chat_history)
 
 # ── Configuración ──────────────────────────────────────────────────────────────
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
@@ -146,6 +149,7 @@ def init_db():
     con.close()
     init_config_store(DB_PATH)
     seed_initial_configs(db_path=DB_PATH)
+    init_memory_store(DB_PATH)
 
 def astro_guardar(chat_id: int, nombre: str, fecha: str, hora: str, lugar: str, carta: dict) -> str:
     import json
@@ -555,10 +559,56 @@ TOOLS = [
             },
             "required": ["title", "start", "end"]
         }
+    },
+    {
+        "name": "memory_buscar",
+        "description": "Busca en la memoria persistente de conversaciones anteriores por una query de texto. Usá cuando el usuario pregunte por conversaciones pasadas, algo que se habló antes, o información previa.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Texto a buscar en la memoria"}
+            },
+            "required": ["query"]
+        }
+    },
+    {
+        "name": "memory_persona",
+        "description": "Busca toda la información almacenada sobre una persona específica: registro de persona, menciones en mensajes y hechos de memoria.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "nombre": {"type": "string", "description": "Nombre de la persona a buscar"}
+            },
+            "required": ["nombre"]
+        }
+    },
+    {
+        "name": "memory_guardar_hecho",
+        "description": "Guarda un hecho o dato importante en la memoria persistente para poder recuperarlo en el futuro.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "content": {"type": "string", "description": "Contenido del hecho a guardar"},
+                "tipo":    {"type": "string", "description": "Tipo de hecho: fact, preference, event, person, note. Default: fact"},
+                "titulo":  {"type": "string", "description": "Título descriptivo corto (opcional)"},
+                "tags":    {"type": "array", "items": {"type": "string"}, "description": "Lista de tags para clasificar el hecho (opcional)"}
+            },
+            "required": ["content"]
+        }
+    },
+    {
+        "name": "memory_stats",
+        "description": "Devuelve estadísticas de la memoria: cantidad de mensajes, sesiones, hechos y personas almacenadas.",
+        "input_schema": {
+            "type": "object",
+            "properties": {}
+        }
     }
 ]
 
 SYSTEM_PROMPT = """CONFIGURACION PERSISTENTE: Tenés acceso a Railway DB para guardar y leer configuraciones. Cuando el usuario diga guardar, dejar fijo, a partir de ahora, esta es la regla, etc., usá config_guardar automáticamente. Cuando el usuario pida ver configs, usá config_listar o config_leer. La DB es la fuente de verdad.
+
+MEMORIA: Tenés memoria persistente en Railway DB. Usá memory_buscar cuando el usuario pregunte por conversaciones pasadas. Usá memory_guardar_hecho para preservar datos importantes. Usá memory_persona para info de una persona específica.
 
 Sos un asistente conversacional integrado a Telegram. Respondés como una persona real con estilo relajado, canchero y seguro, inspirado en un perfil de zona norte de Buenos Aires, con un toque de humor tipo The Big Lebowski: irónico, liviano, medio descontracturado, sin exagerar.
 
@@ -629,7 +679,7 @@ def ask_claude(chat_id: int, user_text: str) -> tuple:
     """Retorna (respuesta_texto, pdf_path_o_None, archivos_extra)
        archivos_extra = lista de (nombre, bytes, caption)
     """
-    history = get_history(chat_id)
+    history = get_history_full(chat_id, limit=MAX_HISTORY, db_path=DB_PATH)
     history.append({"role": "user", "content": user_text})
     messages = history.copy()
     pdf_path    = None
@@ -828,6 +878,72 @@ def ask_claude(chat_id: int, user_text: str) -> tuple:
                         except Exception as e:
                             result = f'Error listando configs: {e}'
 
+                    elif block.name == "memory_buscar":
+                        try:
+                            query = block.input["query"]
+                            res = search_memory(chat_id, query, db_path=DB_PATH)
+                            facts = res.get("memory_facts", [])
+                            msgs  = res.get("messages", [])
+                            lines = []
+                            if facts:
+                                lines.append(f"Hechos en memoria ({len(facts)}):")
+                                for f in facts:
+                                    lines.append(f"  [{f.get('type','')}] {f.get('title','')} — {f.get('content','')[:200]}")
+                            if msgs:
+                                lines.append(f"\nMensajes relacionados ({len(msgs)}):")
+                                for m in msgs:
+                                    lines.append(f"  {m.get('role','')}: {m.get('content','')[:200]}")
+                            result = "\n".join(lines) if lines else "No encontré nada en memoria para esa búsqueda."
+                        except Exception as e:
+                            result = f"Error buscando en memoria: {e}"
+
+                    elif block.name == "memory_persona":
+                        try:
+                            nombre = block.input["nombre"]
+                            res = search_person_memory(chat_id, nombre, db_path=DB_PATH)
+                            lines = []
+                            if res.get("person_record"):
+                                pr = res["person_record"]
+                                lines.append(f"Registro de {pr.get('name',nombre)}:")
+                                lines.append(f"  Facts: {pr.get('facts','')}")
+                                lines.append(f"  Tags: {pr.get('tags','')}")
+                                lines.append(f"  Última vez: {pr.get('last_seen','')[:10]}")
+                            if res.get("message_mentions"):
+                                lines.append(f"\nMenciones en mensajes ({len(res['message_mentions'])}):")
+                                for m in res["message_mentions"][:5]:
+                                    lines.append(f"  {m.get('role','')}: {m.get('content','')[:200]}")
+                            if res.get("memory_facts"):
+                                lines.append(f"\nHechos relacionados ({len(res['memory_facts'])}):")
+                                for f in res["memory_facts"][:5]:
+                                    lines.append(f"  {f.get('title','')} — {f.get('content','')[:200]}")
+                            result = "\n".join(lines) if lines else f"No tengo información guardada sobre {nombre}."
+                        except Exception as e:
+                            result = f"Error buscando persona: {e}"
+
+                    elif block.name == "memory_guardar_hecho":
+                        try:
+                            fact_id = save_memory_fact(
+                                chat_id,
+                                block.input["content"],
+                                fact_type=block.input.get("tipo", "fact"),
+                                title=block.input.get("titulo", ""),
+                                tags=block.input.get("tags", []),
+                                db_path=DB_PATH
+                            )
+                            result = f"Hecho guardado en memoria (id={fact_id})."
+                        except Exception as e:
+                            result = f"Error guardando hecho: {e}"
+
+                    elif block.name == "memory_stats":
+                        try:
+                            stats = get_memory_stats(chat_id, DB_PATH)
+                            result = (f"Memoria: {stats['messages']} mensajes, "
+                                      f"{stats['sessions']} sesiones, "
+                                      f"{stats['memory_facts']} hechos, "
+                                      f"{stats['persons']} personas.")
+                        except Exception as e:
+                            result = f"Error obteniendo stats: {e}"
+
                     else:
                         result = "Herramienta no reconocida."
 
@@ -878,7 +994,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         t.join(timeout=1)
         if t.is_alive():
-            save_message(chat_id, "user", user_msg)
+            save_message_full(chat_id, "user", user_msg, db_path=DB_PATH)
             await update.message.reply_text("Tardo demasiado, intentalo de nuevo.")
             return
 
@@ -887,8 +1003,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             raise Exception(payload)
 
         reply, pdf_path, extra_files = payload
-        save_message(chat_id, "user",      user_msg)
-        save_message(chat_id, "assistant", reply)
+        save_message_full(chat_id, "user",      user_msg, db_path=DB_PATH)
+        save_message_full(chat_id, "assistant", reply,    db_path=DB_PATH)
         try:
             await update.message.reply_text(reply)
         except Exception:
@@ -983,7 +1099,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         t.join(timeout=1)
         if t.is_alive():
-            save_message(chat_id, "user", texto)
+            save_message_full(chat_id, "user", texto, db_path=DB_PATH)
             await update.message.reply_text("Tardo demasiado, intentalo de nuevo.")
             return
 
@@ -992,8 +1108,8 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             raise Exception(payload)
 
         reply, pdf_path, extra_files = payload
-        save_message(chat_id, "user",      texto)
-        save_message(chat_id, "assistant", reply)
+        save_message_full(chat_id, "user",      texto, db_path=DB_PATH)
+        save_message_full(chat_id, "assistant", reply, db_path=DB_PATH)
         try:
             await update.message.reply_text(reply)
         except Exception:
@@ -1025,7 +1141,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    clear_history(update.effective_chat.id)
+    chat_id = update.effective_chat.id
+    clear_history(chat_id)
+    clear_chat_history(chat_id, DB_PATH)
     await update.message.reply_text("Historial borrado, empezamos de cero.")
 
 # ── Menú inline de cartas astrológicas ────────────────────────────────────────
