@@ -6,24 +6,6 @@ import math
 import sys
 import os
 
-# ── Auto-reinicio: si el proceso crashea, se relanza solo ─────────────────────
-def _auto_restart():
-    """Relanza este mismo script si termina inesperadamente."""
-    import subprocess, time
-    while True:
-        proc = subprocess.Popen([sys.executable] + sys.argv,
-                                 env=os.environ.copy())
-        proc.wait()
-        time.sleep(3)
-        # Si llegamos aca, el proceso hijo murio — lo relanzamos
-
-if os.environ.get("CUKINATOR_CHILD") != "1":
-    # Proceso padre: lanza el hijo y lo monitorea
-    os.environ["CUKINATOR_CHILD"] = "1"
-    _auto_restart()
-    sys.exit(0)
-# A partir de aca corre el proceso hijo real
-
 import os
 import tempfile
 import swisseph as swe
