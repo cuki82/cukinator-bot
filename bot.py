@@ -57,10 +57,27 @@ def formatear_carta(carta: dict) -> str:
     return formatear_ficha(carta)
 
 # ── Generador de PDF ───────────────────────────────────────────────────────────
-FONT_REGULAR = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
-FONT_BOLD    = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf"
+def _find_font(candidates: list) -> str:
+    """Retorna el primer path de font que existe."""
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    return None
+
+FONT_REGULAR = _find_font([
+    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+    "/usr/share/fonts/dejavu/DejaVuSansMono.ttf",
+    "/usr/share/fonts/truetype/DejaVuSansMono.ttf",
+])
+FONT_BOLD = _find_font([
+    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",
+    "/usr/share/fonts/dejavu/DejaVuSansMono-Bold.ttf",
+    "/usr/share/fonts/truetype/DejaVuSansMono-Bold.ttf",
+])
 
 def generar_pdf(carta: dict) -> str:
+    if not FONT_REGULAR or not FONT_BOLD:
+        raise RuntimeError("Fonts DejaVu no encontrados en el sistema. Instalar fonts-dejavu-mono.")
     pdf = FPDF()
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=15)
