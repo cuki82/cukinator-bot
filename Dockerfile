@@ -17,6 +17,6 @@ RUN pip install --no-cache-dir \
     requests==2.32.5 \
     timezonefinder==8.2.2
 
-COPY bot.py transcribe.py ./
+COPY bot.py transcribe.py swiss_engine.py memory_store.py config_store.py ./
 
 CMD ["python", "bot.py"]
