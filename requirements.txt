@@ -1,0 +1,10 @@
+python-telegram-bot==22.7
+anthropic==0.94.0
+ddgs==9.13.0
+fpdf2==2.8.7
+geopy==2.4.1
+openai-whisper==20250625
+pyswisseph==2.10.3.2
+pytz==2026.1.post1
+requests==2.32.5
+timezonefinder==8.2.2

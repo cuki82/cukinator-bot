@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+memory.db
+carta.pdf
+/ephe/
+token.json
+credentials.json
+oauth_flow.pkl
+/tmp/
+*.log
+.env
