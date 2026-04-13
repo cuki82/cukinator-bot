@@ -20,6 +20,10 @@ from config_store import init_config_store, seed_initial_configs, save_config, g
 from memory_store import (init_memory_store, save_message_full, get_history_full,
     get_sessions, search_memory, search_person_memory, save_memory_fact,
     upsert_person_memory, get_memory_stats, needs_summary, clear_chat_history)
+from reinsurance_kb import (init_reinsurance_kb, search_knowledge, get_document_list,
+    get_kb_stats, create_document, add_chunk, add_concept, add_summary, add_qa,
+    chunk_text, build_enrichment_prompt, build_summary_prompt, is_reinsurance_context,
+    detect_domain)
 
 # ── Configuración ──────────────────────────────────────────────────────────────
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
@@ -191,6 +195,7 @@ def init_db():
     init_config_store(DB_PATH)
     seed_initial_configs(db_path=DB_PATH)
     init_memory_store(DB_PATH)
+    init_reinsurance_kb(DB_PATH)
 
 def astro_guardar(chat_id: int, nombre: str, fecha: str, hora: str, lugar: str, carta: dict) -> str:
     import json
@@ -765,11 +770,86 @@ TOOLS = [
             "type": "object",
             "properties": {}
         }
+    },
+    {
+        "name": "ri_consultar",
+        "description": (
+            "Consulta la knowledge base interna de reaseguros. "
+            "Usá SIEMPRE antes de responder preguntas sobre reaseguros, seguros, normativa argentina de seguros, "
+            "wordings, cláusulas o conceptos técnicos del rubro. "
+            "Buscá conceptos, definiciones, QA y fragmentos de documentos indexados."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Término o pregunta a buscar en la KB de reaseguros"}
+            },
+            "required": ["query"]
+        }
+    },
+    {
+        "name": "ri_listar_documentos",
+        "description": "Lista los documentos indexados en la knowledge base de reaseguros.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "tipo": {"type": "string", "description": "Filtrar por tipo: doctrine, wording, regulation, operational (opcional)"}
+            }
+        }
+    },
+    {
+        "name": "ri_stats",
+        "description": "Estadísticas de la knowledge base de reaseguros: documentos, conceptos, QA indexados.",
+        "input_schema": {
+            "type": "object",
+            "properties": {}
+        }
+    },
+    {
+        "name": "ri_ingestar",
+        "description": (
+            "Ingesta y procesa un texto o fragmento de documento de reaseguros en la knowledge base. "
+            "Usá cuando el usuario quiera agregar conocimiento, cargar una cláusula, definición o texto normativo. "
+            "El sistema extrae conceptos, genera QA y resúmenes automáticamente."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "titulo":       {"type": "string", "description": "Título del documento"},
+                "contenido":    {"type": "string", "description": "Texto a ingestar"},
+                "tipo_fuente":  {"type": "string", "description": "doctrine | wording | regulation | operational"},
+                "organizacion": {"type": "string", "description": "LMA, Lloyd's, SSN, etc. (opcional)"},
+                "referencia":   {"type": "string", "description": "Código de referencia (NMA 1234, Art. 158, etc.) (opcional)"}
+            },
+            "required": ["titulo", "contenido", "tipo_fuente"]
+        }
     }
 ]
 
 SYSTEM_PROMPT = """IDENTIDAD — REGLA ABSOLUTA:
 Tu nombre es Cukinator (se pronuncia "Cuki" en audio). NUNCA digas que te llamás Claude, Claudio, ni ningún otro nombre. Si te preguntan cómo te llamás, respondé siempre "Cukinator" (en texto) o "Cuki" (en audio). No sos Claude. Sos Cukinator.
+
+ARQUITECTURA DE ROLES:
+Sos un agente multi-dominio con memoria persistente. Tus roles activos:
+- Asistente conversacional general
+- Asistente técnico (IA, bots, APIs, devops)
+- Astrólogo
+- Asistente estratégico
+- Especialista en reaseguros e insurance operations (MÓDULO CONTEXTUAL)
+
+MÓDULO REASEGUROS — ACTIVACIÓN CONTEXTUAL:
+Este módulo se activa SOLO cuando el usuario habla de: reinsurance, reaseguros, treaty, facultative, retrocession, underwriting, pricing, claims, wording, cláusulas, MGA/MGU, normativa de seguros, LMA, Lloyd's, SSN, Ley 17418, burning cost, loss ratio, IBNR, quota share, excess of loss.
+Si el contexto NO es reaseguros, ignorar completamente este módulo.
+NO convertirte en un bot de reaseguros. Es un módulo activable, no tu identidad.
+
+Cuando el módulo reaseguros está activo:
+- Respondé con precisión técnica y operativa
+- Estructurá: definición técnica → implicancia operativa → ejemplo real
+- Si aplica normativa argentina: agregar impacto regulatorio
+- Usá ri_consultar para buscar en la knowledge base interna antes de responder
+- Distinguí siempre entre: doctrina, wording, normativa, práctica operativa
+- No citar automáticamente — solo si hay ambigüedad o el usuario lo pide
+- Para ingestar documentos usá ri_ingestar
 
 CONFIGURACION PERSISTENTE: Tenés acceso a Railway DB para guardar y leer configuraciones. Cuando el usuario diga guardar, dejar fijo, a partir de ahora, esta es la regla, etc., usá config_guardar automáticamente. Cuando el usuario pida ver configs, usá config_listar o config_leer. La DB es la fuente de verdad.
 
@@ -1139,6 +1219,110 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
                                       f"{stats['persons']} personas.")
                         except Exception as e:
                             result = f"Error obteniendo stats: {e}"
+
+                    elif block.name == "ri_consultar":
+                        try:
+                            query = block.input.get("query", "")
+                            res = search_knowledge(query, db_path=DB_PATH)
+                            parts = []
+                            if res["concepts"]:
+                                parts.append(f"CONCEPTOS ({len(res['concepts'])}):")
+                                for c in res["concepts"][:4]:
+                                    parts.append(f"  {c['term']}: {c['definition'][:200]}")
+                            if res["qa"]:
+                                parts.append(f"QA ({len(res['qa'])}):")
+                                for q in res["qa"][:3]:
+                                    parts.append(f"  Q: {q['question']}\n  A: {q['answer'][:200]}")
+                            if res["chunks"]:
+                                parts.append(f"FRAGMENTOS ({len(res['chunks'])}):")
+                                for ch in res["chunks"][:2]:
+                                    parts.append(f"  [{ch['source']}] {ch['content'][:300]}")
+                            result = "\n".join(parts) if parts else f"No encontré información sobre '{query}' en la KB."
+                        except Exception as e:
+                            result = f"Error consultando KB: {e}"
+
+                    elif block.name == "ri_listar_documentos":
+                        try:
+                            tipo = block.input.get("tipo")
+                            docs = get_document_list(tipo, DB_PATH)
+                            if not docs:
+                                result = "No hay documentos en la KB de reaseguros."
+                            else:
+                                lines = [f"Documentos en KB ({len(docs)}):"]
+                                for d in docs:
+                                    lines.append(f"  [{d['type']}] {d['title']} — {d['org'] or ''} {d['ref'] or ''}")
+                                result = "\n".join(lines)
+                        except Exception as e:
+                            result = f"Error: {e}"
+
+                    elif block.name == "ri_stats":
+                        try:
+                            stats = get_kb_stats(DB_PATH)
+                            result = (f"KB Reaseguros: {stats['documents']} docs, "
+                                      f"{stats['chunks']} chunks, {stats['concepts']} conceptos, "
+                                      f"{stats['qa']} QA, {stats['summaries']} resúmenes.")
+                        except Exception as e:
+                            result = f"Error: {e}"
+
+                    elif block.name == "ri_ingestar":
+                        try:
+                            titulo    = block.input["titulo"]
+                            contenido = block.input["contenido"]
+                            tipo      = block.input["tipo_fuente"]
+                            org       = block.input.get("organizacion")
+                            ref       = block.input.get("referencia")
+
+                            # Crear documento
+                            doc_id = create_document(titulo, tipo, org, ref, db_path=DB_PATH)
+
+                            # Chunking
+                            chunks = chunk_text(contenido)
+                            for i, chunk in enumerate(chunks):
+                                add_chunk(doc_id, chunk, i, db_path=DB_PATH)
+
+                            # Enriquecer con Claude (sincrónico en el tool)
+                            enrichment_prompt = build_enrichment_prompt(contenido, tipo, titulo)
+                            enrich_resp = claude.messages.create(
+                                model="claude-opus-4-5",
+                                max_tokens=1500,
+                                messages=[{"role": "user", "content": enrichment_prompt}]
+                            )
+                            import json as _json
+                            try:
+                                enrich_data = _json.loads(enrich_resp.content[0].text)
+                                for c in enrich_data.get("concepts", []):
+                                    add_concept(doc_id, c["term"], c["definition"],
+                                                c.get("domain"), DB_PATH)
+                                for q in enrich_data.get("qa", []):
+                                    add_qa(doc_id, q["question"], q["answer"],
+                                           q.get("domain"), DB_PATH)
+                            except Exception:
+                                pass
+
+                            # Resumen
+                            sum_prompt = build_summary_prompt(contenido, tipo, titulo)
+                            sum_resp = claude.messages.create(
+                                model="claude-opus-4-5",
+                                max_tokens=800,
+                                messages=[{"role": "user", "content": sum_prompt}]
+                            )
+                            try:
+                                sum_data = _json.loads(sum_resp.content[0].text)
+                                add_summary(doc_id, sum_data.get("executive",""),
+                                            sum_data.get("key_points",[]),
+                                            sum_data.get("operational",""),
+                                            sum_data.get("risks",""), DB_PATH)
+                            except Exception:
+                                pass
+
+                            stats = get_kb_stats(DB_PATH)
+                            result = (f"Documento '{titulo}' indexado en KB. "
+                                      f"{len(chunks)} chunks, conceptos y QA extraídos. "
+                                      f"KB total: {stats['documents']} docs, {stats['concepts']} conceptos.")
+                            log.info(f"RI ingested: {titulo} ({tipo})")
+                        except Exception as e:
+                            result = f"Error ingiriendo documento: {e}"
+                            log.error(f"RI ingest error: {e}")
 
                     else:
                         result = "Herramienta no reconocida."
