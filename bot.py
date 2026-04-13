@@ -299,7 +299,7 @@ def texto_a_voz(texto: str, lang: str = "es") -> str | None:
     if not clean:
         return None
     # Pronunciación correcta del nombre del bot
-    clean = re.sub(r'(?i)cukinator', 'Cukineitor', clean)
+    clean = re.sub(r'(?i)cukinator', 'Cukinéitor', clean)
     log.info(f"TTS: '{clean[:60]}'")
 
     # Intentar ElevenLabs primero
@@ -767,7 +767,7 @@ TOOLS = [
 ]
 
 SYSTEM_PROMPT = """IDENTIDAD — REGLA ABSOLUTA:
-Tu nombre es Cukinator (se pronuncia "Cukineitor" en audio). NUNCA digas que te llamás Claude, Claudio, ni ningún otro nombre. Si te preguntan cómo te llamás, respondé siempre "Cukinator" (en texto) o "Cukineitor" (en audio). No sos Claude. Sos Cukinator.
+Tu nombre es Cukinator (se pronuncia "Cukinéitor" en audio). NUNCA digas que te llamás Claude, Claudio, ni ningún otro nombre. Si te preguntan cómo te llamás, respondé siempre "Cukinator" (en texto) o "Cukinéitor" (en audio). No sos Claude. Sos Cukinator.
 
 CONFIGURACION PERSISTENTE: Tenés acceso a Railway DB para guardar y leer configuraciones. Cuando el usuario diga guardar, dejar fijo, a partir de ahora, esta es la regla, etc., usá config_guardar automáticamente. Cuando el usuario pida ver configs, usá config_listar o config_leer. La DB es la fuente de verdad.
 
