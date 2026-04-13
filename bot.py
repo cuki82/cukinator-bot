@@ -1973,6 +1973,30 @@ async def handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYP
                     await context.bot.send_voice(chat_id=chat_id, voice=f)
                 os.unlink(ogg)
             return
+        elif accion == "astro_lista":
+            # Mostrar directamente el menú de cartas con botones
+            await query.edit_message_text("Cargando cartas guardadas...")
+            await menu_lista_cartas(query, context, chat_id)
+            return
+        elif accion == "astro_calc":
+            await query.edit_message_text(
+                "Para calcular una carta natal decime:\nFecha (DD/MM/AAAA), hora (HH:MM) y lugar de nacimiento."
+            )
+            return
+        elif accion == "astro_ficha":
+            perfiles = astro_listar(chat_id)
+            if not perfiles:
+                await query.edit_message_text("No hay cartas guardadas. Primero calculá una carta natal.")
+                return
+            botones = [[InlineKeyboardButton(
+                p['nombre'].title(), callback_data=f"astro:ficha:{p['nombre']}"
+            )] for p in perfiles]
+            botones.append([InlineKeyboardButton("← Volver", callback_data="menu:astro")])
+            await query.edit_message_text(
+                "¿De quién querés la ficha técnica completa?",
+                reply_markup=InlineKeyboardMarkup(botones)
+            )
+            return
         elif accion == "sys_config":
             configs = list_configs(db_path=DB_PATH)
             lines = [f"{c['namespace']}.{c['key']} v{c['version']}" for c in configs[:15]]
