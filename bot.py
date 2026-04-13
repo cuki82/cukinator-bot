@@ -1252,10 +1252,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_document(chat_id=chat_id, document=f,
                     filename="carta_natal.pdf", caption="Ficha tecnica - Carta Natal")
 
-        log.info(f"[{chat_id}] extra_files: {[(n,cap,len(c)) for n,c,cap in extra_files]}")
+        # Verificar si el usuario pidió voz explícitamente
+        _pidio_voz = any(w in user_msg.lower() for w in
+            ["voz", "audio", "escuchar", "hablame", "háblame",
+             "respondé con voz", "responde con voz", "mandame un audio"])
+
+        log.info(f"[{chat_id}] extra_files: {[(n,cap,len(c)) for n,c,cap in extra_files]} | pidio_voz={_pidio_voz}")
         for nombre_f, contenido, caption in extra_files:
             try:
                 if caption == "voice":
+                    if not _pidio_voz:
+                        log.info(f"[{chat_id}] Voz ignorada (usuario no la pidió)")
+                        continue  # <-- NUNCA mandar voz si no la pidió
                     await context.bot.send_chat_action(chat_id=chat_id, action="record_voice")
                     await context.bot.send_voice(chat_id=chat_id, voice=io.BytesIO(contenido))
                     log.info(f"[{chat_id}] Voz enviada OK: {len(contenido)} bytes")
