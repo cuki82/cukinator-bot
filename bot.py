@@ -300,6 +300,48 @@ async def get_weather(location: str = "Buenos Aires") -> dict:
         return {"error": str(e)}
 
 
+# ── Skill: GitHub Push via API ─────────────────────────────────────────────────
+async def github_push(repo: str, path: str, content: str,
+                      message: str, branch: str = "main") -> dict:
+    """Crea o actualiza un archivo en GitHub via API. Triggerea Railway auto-deploy."""
+    import base64 as _b64
+    token = os.environ.get("GITHUB_TOKEN")
+    if not token:
+        return {"error": "GITHUB_TOKEN no configurado. Agregalo como variable de entorno en Railway."}
+    url = f"https://api.github.com/repos/{repo}/contents/{path}"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    try:
+        async with _httpx.AsyncClient(timeout=15) as client:
+            # Obtener SHA si el archivo ya existe
+            existing = await client.get(url, headers=headers, params={"ref": branch})
+            sha = existing.json().get("sha") if existing.status_code == 200 else None
+            payload = {
+                "message": message,
+                "content": _b64.b64encode(content.encode()).decode(),
+                "branch": branch,
+            }
+            if sha:
+                payload["sha"] = sha
+            resp = await client.put(url, headers=headers, json=payload)
+        if resp.status_code in (200, 201):
+            data = resp.json()
+            return {
+                "ok":     True,
+                "action": "updated" if sha else "created",
+                "path":   path,
+                "sha":    data["content"]["sha"][:7],
+                "url":    data["content"]["html_url"],
+                "deploy": "Railway auto-deploy triggered",
+            }
+        return {"error": resp.text[:200], "status": resp.status_code}
+    except Exception as e:
+        return {"error": str(e)}
+
+
 # ── Skill: Hora local (WorldTimeAPI) ──────────────────────────────────────────
 _CITY_TZ = {
     "buenos aires":"America/Argentina/Buenos_Aires","cordoba":"America/Argentina/Cordoba",
@@ -625,6 +667,27 @@ TOOLS = [
                     "description": "Timezone IANA (ej: America/Argentina/Buenos_Aires, Europe/London) o nombre de ciudad (ej: Tokyo, Madrid). Default: America/Argentina/Buenos_Aires"
                 }
             }
+        }
+    },
+    {
+        "name": "github_push",
+        "description": (
+            "Crea o actualiza un archivo en GitHub via API y trigerea Railway auto-deploy. "
+            "Usá para aplicar cambios de código al bot directamente desde Telegram. "
+            "El repo por default es cuki82/cukinator-bot. "
+            "SIEMPRE usá este tool cuando el usuario pida modificar código, agregar funciones, "
+            "actualizar archivos del proyecto, o aplicar cambios que requieran deploy."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "repo":    {"type": "string", "description": "Repo owner/name. Default: cuki82/cukinator-bot"},
+                "path":    {"type": "string", "description": "Path del archivo en el repo (ej: bot.py, modules/weather.py)"},
+                "content": {"type": "string", "description": "Contenido COMPLETO del archivo"},
+                "message": {"type": "string", "description": "Mensaje del commit"},
+                "branch":  {"type": "string", "description": "Branch. Default: main"}
+            },
+            "required": ["path", "content", "message"]
         }
     },
     {
@@ -1202,7 +1265,35 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
             for block in response.content:
                 if block.type == "tool_use":
 
-                    if block.name == "get_time":
+                    if block.name == "github_push":
+                        try:
+                            import asyncio as _asyncio
+                            repo    = block.input.get("repo", "cuki82/cukinator-bot")
+                            path    = block.input["path"]
+                            content = block.input["content"]
+                            message = block.input["message"]
+                            branch  = block.input.get("branch", "main")
+                            data = _asyncio.run(github_push(repo, path, content, message, branch))
+                            if data.get("ok"):
+                                result = (f"GitHub push OK: {data['action']} {path} "
+                                          f"(sha:{data['sha']}) → {data.get('deploy','')}")
+                                log_change(
+                                    instruction=f"github_push {path}",
+                                    action=f"Archivo '{path}' {data['action']} en {repo}",
+                                    result=f"SHA:{data['sha']} — Railway auto-deploy triggered",
+                                    status="requires_deploy",
+                                    files_changed=[path],
+                                    chat_id=chat_id,
+                                    db_path=DB_PATH
+                                )
+                                log.info(f"[{chat_id}] GitHub push: {path} sha:{data['sha']}")
+                            else:
+                                result = f"Error en push: {data.get('error','desconocido')}"
+                        except Exception as e:
+                            result = f"Error github_push: {e}"
+                            log.error(f"github_push error: {e}")
+
+                    elif block.name == "get_time":
                         try:
                             import asyncio as _asyncio
                             raw = block.input.get("timezone", "America/Argentina/Buenos_Aires")
