@@ -850,22 +850,26 @@ def get_system_prompt(user_name: str = None, chat_id: int = None) -> str:
 
     return prompt
 
-def ask_claude(chat_id: int, user_text: str, user_name: str = None) -> tuple:
+def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice: bool = False) -> tuple:
     """Retorna (respuesta_texto, pdf_path_o_None, archivos_extra)
        archivos_extra = lista de (nombre, bytes, caption)
+       allow_voice: si False, quita enviar_voz de los tools disponibles
     """
     history = get_history_full(chat_id, limit=MAX_HISTORY, db_path=DB_PATH)
     history.append({"role": "user", "content": user_text})
     messages = history.copy()
     pdf_path    = None
-    extra_files = []  # [(nombre, bytes, caption)]
+    extra_files = []
+
+    # Quitar enviar_voz si el usuario no pidió audio
+    tools_activos = [t for t in TOOLS if allow_voice or t["name"] != "enviar_voz"]
 
     while True:
         response = claude.messages.create(
             model="claude-opus-4-5",
             max_tokens=2048,
             system=get_system_prompt(user_name=user_name, chat_id=chat_id),
-            tools=TOOLS,
+            tools=tools_activos,
             messages=messages
         )
 
@@ -1205,7 +1209,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         def run_claude():
             try:
-                q.put(("ok", ask_claude(chat_id, user_msg, user_name=name)))
+                pidio_voz = any(w in user_msg.lower() for w in
+                    ["voz", "audio", "escuchar", "hablame", "háblame",
+                     "respondé con voz", "responde con voz", "mandame un audio", "en audio"])
+                q.put(("ok", ask_claude(chat_id, user_msg, user_name=name, allow_voice=pidio_voz)))
             except Exception as e:
                 q.put(("err", str(e)))
 
@@ -1236,17 +1243,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_message_full(chat_id, "user",      user_msg, db_path=DB_PATH)
         save_message_full(chat_id, "assistant", reply,    db_path=DB_PATH)
 
-        # Para mensajes de TEXTO: voz solo si el usuario la pidió explícitamente
-        pidio_voz_explicito = any(w in user_msg.lower() for w in
-            ["voz", "audio", "escuchar", "hablame", "háblame", "respondé con voz",
-             "responde con voz", "mandame un audio", "en audio"])
-        if not pidio_voz_explicito:
-            extra_files = [(n, c, cap) for n, c, cap in extra_files if cap != "voice"]
-
-        # Enviar texto siempre (salvo que SOLO haya voz)
-        tiene_voz_explícita = any(cap == "voice" for _, _, cap in extra_files)
-        if reply and (not tiene_voz_explícita or reply.strip() != "[voz enviada]"):
-            await send_long_message(context.bot, chat_id, reply, reply_to=update.message)
+        # Enviar respuesta de texto
+        await send_long_message(context.bot, chat_id, reply, reply_to=update.message)
 
         if pdf_path:
             await context.bot.send_chat_action(chat_id=chat_id, action="upload_document")
@@ -1326,7 +1324,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         def run_claude():
             try:
-                q.put(("ok", ask_claude(chat_id, texto, user_name=name)))
+                q.put(("ok", ask_claude(chat_id, texto, user_name=name, allow_voice=True)))
             except Exception as e:
                 q.put(("err", str(e)))
 
