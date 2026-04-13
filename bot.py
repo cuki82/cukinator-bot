@@ -267,32 +267,32 @@ import urllib3 as _urllib3
 VOICE_MAX_CHARS = 500  # respuestas más largas van como texto
 
 def texto_a_voz(texto: str, lang: str = "es") -> str | None:
-    """Convierte texto a OGG/OPUS usando gTTS + ffmpeg. Retorna path al archivo o None si falla."""
+    """Convierte texto a OGG/OPUS usando gTTS + ffmpeg."""
     try:
         from gtts import gTTS
         import tempfile, subprocess, re
-        # Limpiar texto para TTS
         clean = re.sub(r'[*_`#\|─╔╚╗╝═☌☍□△⚹]', '', texto)
         clean = re.sub(r'\s+', ' ', clean).strip()
         if not clean:
+            log.warning("TTS: texto vacío después de limpiar")
             return None
-        # Generar MP3
-        tts = gTTS(clean[:VOICE_MAX_CHARS], lang=lang, slow=False)
+        log.info(f"TTS: generando audio para: {clean[:60]}")
         mp3 = tempfile.mktemp(suffix=".mp3")
         ogg = tempfile.mktemp(suffix=".ogg")
-        tts.save(mp3)
-        # Convertir a OGG/OPUS (formato que Telegram espera para send_voice)
+        gTTS(clean[:VOICE_MAX_CHARS], lang=lang, slow=False).save(mp3)
+        log.info(f"TTS: MP3 generado {os.path.getsize(mp3)} bytes")
         result = subprocess.run(
             ["ffmpeg", "-y", "-i", mp3, "-c:a", "libopus", "-b:a", "64k", ogg],
             capture_output=True
         )
         os.unlink(mp3)
         if result.returncode != 0:
-            log.warning(f"ffmpeg error: {result.stderr.decode()[:200]}")
+            log.error(f"TTS ffmpeg error: {result.stderr.decode()[:200]}")
             return None
+        log.info(f"TTS: OGG generado {os.path.getsize(ogg)} bytes")
         return ogg
     except Exception as e:
-        log.warning(f"TTS error: {e}")
+        log.error(f"TTS error: {e}")
         return None
 
 def es_respuesta_larga(texto: str) -> bool:
@@ -1310,6 +1310,23 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log.error(f"Error en voz: {e}")
         await update.message.reply_text("No pude procesar el audio, intentalo de nuevo.")
 
+async def cmd_testvoice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando de diagnóstico: genera y manda un audio de prueba."""
+    chat_id = update.effective_chat.id
+    await context.bot.send_chat_action(chat_id=chat_id, action="record_voice")
+    try:
+        ogg = texto_a_voz("Hola, la voz funciona correctamente.")
+        if ogg:
+            with open(ogg, "rb") as f:
+                await context.bot.send_voice(chat_id=chat_id, voice=f)
+            os.unlink(ogg)
+            log.info(f"[{chat_id}] /testvoice OK")
+        else:
+            await update.message.reply_text("TTS falló: texto_a_voz retornó None")
+    except Exception as e:
+        log.error(f"[{chat_id}] /testvoice error: {e}")
+        await update.message.reply_text(f"Error en voz: {e}")
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name = update.effective_user.first_name or ""
     await update.message.reply_text(
@@ -1439,9 +1456,10 @@ if __name__ == "__main__":
         log.warning(f"No se pudo cargar config: {e}")
     log.info("🤖 CukinatorBot iniciando...")
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("reset", cmd_reset))
-    app.add_handler(CommandHandler("cartas", cmd_cartas))
+    app.add_handler(CommandHandler("start",     cmd_start))
+    app.add_handler(CommandHandler("reset",     cmd_reset))
+    app.add_handler(CommandHandler("cartas",    cmd_cartas))
+    app.add_handler(CommandHandler("testvoice", cmd_testvoice))
     app.add_handler(CallbackQueryHandler(handle_callback, pattern="^astro:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
