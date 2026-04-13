@@ -986,66 +986,43 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
 
                     if block.name == "buscar_video":
                         try:
-                            import yt_dlp as _ytdlp, tempfile as _tmp
-                            query       = block.input["query"]
-                            max_dur     = block.input.get("max_duration", 600)
-                            tmp_dir     = _tmp.mkdtemp()
-                            MAX_BYTES   = 48 * 1024 * 1024  # 48MB
+                            import yt_dlp as _ytdlp
+                            query   = block.input["query"]
+                            max_dur = block.input.get("max_duration", 900)
 
                             log.info(f"[{chat_id}] Buscando video: {query}")
 
-                            # Primero buscar sin descargar para obtener info
                             info_opts = {
                                 "quiet": True, "no_warnings": True,
                                 "noplaylist": True, "nocheckcertificate": True,
                             }
                             with _ytdlp.YoutubeDL(info_opts) as ydl:
-                                info = ydl.extract_info(f"ytsearch1:{query}", download=False)
+                                info = ydl.extract_info(f"ytsearch3:{query}", download=False)
 
                             if not info or not info.get("entries"):
                                 result = f"No encontré videos para: {query}"
                             else:
-                                video = info["entries"][0]
+                                # Tomar el más relevante (primero)
+                                entries = [e for e in info["entries"] if e and e.get("duration", 0) <= max_dur]
+                                if not entries:
+                                    entries = info["entries"][:1]
+                                video   = entries[0]
                                 titulo  = video.get("title", "Video")
                                 url     = video.get("webpage_url", "")
-                                dur_seg = video.get("duration", 0) or 0
+                                dur_seg = int(video.get("duration", 0) or 0)
+                                canal   = video.get("uploader", "")
+                                mins    = dur_seg // 60
+                                segs    = dur_seg % 60
 
-                                if dur_seg > max_dur:
-                                    result = f"Video encontrado pero es muy largo ({dur_seg//60} min): {titulo}\nLink: {url}"
-                                else:
-                                    # Descargar
-                                    dl_opts = {
-                                        "format": "bestvideo[ext=mp4][height<=480]+bestaudio[ext=m4a]/best[ext=mp4][height<=480]/best[height<=480]",
-                                        "outtmpl": f"{tmp_dir}/video.%(ext)s",
-                                        "quiet": True, "no_warnings": True,
-                                        "nocheckcertificate": True,
-                                        "merge_output_format": "mp4",
-                                        "noplaylist": True,
-                                    }
-                                    with _ytdlp.YoutubeDL(dl_opts) as ydl:
-                                        ydl.download([url])
-
-                                    # Encontrar el archivo descargado
-                                    archivos = [f for f in os.listdir(tmp_dir) if f.endswith((".mp4", ".mkv", ".webm"))]
-                                    if not archivos:
-                                        result = f"Descarga fallida. Link: {url}"
-                                    else:
-                                        video_path = os.path.join(tmp_dir, archivos[0])
-                                        size = os.path.getsize(video_path)
-                                        log.info(f"[{chat_id}] Video descargado: {size//1024//1024}MB")
-
-                                        if size > MAX_BYTES:
-                                            os.unlink(video_path)
-                                            result = f"Video muy grande ({size//1024//1024}MB, límite 48MB). Link: {url}"
-                                        else:
-                                            extra_files.append((
-                                                f"{titulo[:50]}.mp4",
-                                                open(video_path, "rb").read(),
-                                                f"video|{titulo[:60]}"
-                                            ))
-                                            os.unlink(video_path)
-                                            result = f"[video listo: {titulo}]"
-                                            log.info(f"[{chat_id}] Video agregado a extra_files: {size//1024//1024}MB")
+                                # Mandar link — Telegram genera preview automático
+                                # También agregar como mensaje especial que el handler envía
+                                extra_files.append((
+                                    "video_link",
+                                    f"{titulo}\n{url}\n{canal} | {mins}:{segs:02d}".encode(),
+                                    "video_link"
+                                ))
+                                result = f"[video encontrado: {titulo} ({mins}:{segs:02d})]"
+                                log.info(f"[{chat_id}] Video encontrado: {titulo} | {url}")
                         except Exception as e:
                             result = f"Error descargando video: {e}"
                             log.error(f"buscar_video error: {e}")
@@ -1545,6 +1522,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await context.bot.send_chat_action(chat_id=chat_id, action="record_voice")
                     await context.bot.send_voice(chat_id=chat_id, voice=io.BytesIO(contenido))
                     log.info(f"[{chat_id}] Voz enviada OK: {len(contenido)} bytes")
+                elif caption == "video_link":
+                    # Mandar como link con preview de Telegram
+                    info_txt = contenido.decode()
+                    lines = info_txt.split("\n")
+                    titulo_v = lines[0] if lines else "Video"
+                    link_v   = lines[1] if len(lines) > 1 else ""
+                    meta_v   = lines[2] if len(lines) > 2 else ""
+                    msg = f"{titulo_v}\n{meta_v}\n\n{link_v}" if meta_v else f"{titulo_v}\n{link_v}"
+                    await context.bot.send_message(chat_id=chat_id, text=msg)
+                    log.info(f"[{chat_id}] Video link enviado: {titulo_v}")
                 elif caption.startswith("video|"):
                     titulo_vid = caption.split("|", 1)[1]
                     await context.bot.send_chat_action(chat_id=chat_id, action="upload_video")
@@ -1680,6 +1667,16 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await context.bot.send_chat_action(chat_id=chat_id, action="record_voice")
                     await context.bot.send_voice(chat_id=chat_id, voice=io.BytesIO(contenido))
                     log.info(f"[{chat_id}] Voz enviada OK: {len(contenido)} bytes")
+                elif caption == "video_link":
+                    # Mandar como link con preview de Telegram
+                    info_txt = contenido.decode()
+                    lines = info_txt.split("\n")
+                    titulo_v = lines[0] if lines else "Video"
+                    link_v   = lines[1] if len(lines) > 1 else ""
+                    meta_v   = lines[2] if len(lines) > 2 else ""
+                    msg = f"{titulo_v}\n{meta_v}\n\n{link_v}" if meta_v else f"{titulo_v}\n{link_v}"
+                    await context.bot.send_message(chat_id=chat_id, text=msg)
+                    log.info(f"[{chat_id}] Video link enviado: {titulo_v}")
                 elif caption.startswith("video|"):
                     titulo_vid = caption.split("|", 1)[1]
                     await context.bot.send_chat_action(chat_id=chat_id, action="upload_video")
