@@ -1163,22 +1163,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_message_full(chat_id, "user",      user_msg, db_path=DB_PATH)
         save_message_full(chat_id, "assistant", reply,    db_path=DB_PATH)
 
-        # Responder con voz si el usuario lo pidió explícitamente
-        pide_voz = any(w in user_msg.lower() for w in
-                       ["responde con voz", "en voz", "mandame audio", "respondé con voz",
-                        "en audio", "por audio", "manda audio", "respuesta de voz",
-                        "audio", "hablado", "hablame", "háblame", "escuchar",
-                        "quiero escuchar", "mandame un audio", "voz"])
-        if pide_voz and not es_respuesta_larga(reply):
-            mp3 = texto_a_voz(reply)
-            if mp3:
-                await context.bot.send_chat_action(chat_id=chat_id, action="record_voice")
-                with open(mp3, "rb") as f:
-                    await context.bot.send_voice(chat_id=chat_id, voice=f)
-                os.unlink(mp3)
-            else:
-                await send_long_message(context.bot, chat_id, reply, reply_to=update.message)
-        else:
+        # Enviar texto (solo si no es "[voz enviada]" puro)
+        if reply and reply.strip() != "[voz enviada]":
             await send_long_message(context.bot, chat_id, reply, reply_to=update.message)
 
         if pdf_path:
@@ -1286,18 +1272,8 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_message_full(chat_id, "user",      texto, db_path=DB_PATH)
         save_message_full(chat_id, "assistant", reply, db_path=DB_PATH)
 
-        # Si el usuario mandó audio y la respuesta es corta → responder con voz
-        if not es_respuesta_larga(reply):
-            mp3 = texto_a_voz(reply)
-            if mp3:
-                await context.bot.send_chat_action(chat_id=chat_id, action="record_voice")
-                with open(mp3, "rb") as f:
-                    await context.bot.send_voice(chat_id=chat_id, voice=f)
-                os.unlink(mp3)
-            else:
-                await send_long_message(context.bot, chat_id, reply, reply_to=update.message)
-        else:
-            # Respuesta larga → texto
+        # Enviar texto (solo si Claude no usó el tool enviar_voz)
+        if reply and reply.strip() != "[voz enviada]":
             await send_long_message(context.bot, chat_id, reply, reply_to=update.message)
 
         if pdf_path:
