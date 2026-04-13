@@ -267,27 +267,33 @@ import urllib3 as _urllib3
 VOICE_MAX_CHARS = 500  # respuestas más largas van como texto
 
 def texto_a_voz(texto: str, lang: str = "es") -> str | None:
-    """Convierte texto a OGG/OPUS usando gTTS + ffmpeg."""
+    """Convierte texto a OGG/OPUS usando espeak-ng (offline) + ffmpeg."""
     try:
-        from gtts import gTTS
         import tempfile, subprocess, re
         clean = re.sub(r'[*_`#\|─╔╚╗╝═☌☍□△⚹]', '', texto)
         clean = re.sub(r'\s+', ' ', clean).strip()
         if not clean:
-            log.warning("TTS: texto vacío después de limpiar")
+            log.warning("TTS: texto vacío")
             return None
-        log.info(f"TTS: generando audio para: {clean[:60]}")
-        mp3 = tempfile.mktemp(suffix=".mp3")
+        log.info(f"TTS: generando voz para: {clean[:60]}")
+        wav = tempfile.mktemp(suffix=".wav")
         ogg = tempfile.mktemp(suffix=".ogg")
-        gTTS(clean[:VOICE_MAX_CHARS], lang=lang, slow=False).save(mp3)
-        log.info(f"TTS: MP3 generado {os.path.getsize(mp3)} bytes")
-        result = subprocess.run(
-            ["ffmpeg", "-y", "-i", mp3, "-c:a", "libopus", "-b:a", "64k", ogg],
+        # espeak-ng: -v es (español), -s 145 (velocidad), -w (output wav)
+        r1 = subprocess.run(
+            ["espeak-ng", "-v", "es", "-s", "145", "-w", wav, clean[:VOICE_MAX_CHARS]],
             capture_output=True
         )
-        os.unlink(mp3)
-        if result.returncode != 0:
-            log.error(f"TTS ffmpeg error: {result.stderr.decode()[:200]}")
+        if r1.returncode != 0:
+            log.error(f"TTS espeak-ng error: {r1.stderr.decode()[:200]}")
+            return None
+        log.info(f"TTS: WAV generado {os.path.getsize(wav)} bytes")
+        r2 = subprocess.run(
+            ["ffmpeg", "-y", "-i", wav, "-c:a", "libopus", "-b:a", "64k", ogg],
+            capture_output=True
+        )
+        os.unlink(wav)
+        if r2.returncode != 0:
+            log.error(f"TTS ffmpeg error: {r2.stderr.decode()[:200]}")
             return None
         log.info(f"TTS: OGG generado {os.path.getsize(ogg)} bytes")
         return ogg
