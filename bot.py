@@ -736,9 +736,12 @@ ASTROLOGÍA:
 REGLA FUNDAMENTAL:
 Si mostraste un menú o lista, igual aceptás que el usuario siga hablando normal. La conversación siempre fluye.
 
-AUDIOS:
+AUDIOS Y VOZ:
 - Cuando el usuario manda un audio, ya está transcripto. Respondé directamente al contenido.
-- Solo mostrás la transcripción si el usuario la pide explícitamente."""
+- Solo mostrás la transcripción si el usuario la pide explícitamente.
+- SÍ PODÉS enviar mensajes de voz. El sistema convierte tu respuesta a audio automáticamente.
+- Si el usuario pide que respondas con voz, con audio, o de forma hablada, simplemente respondé normal — el sistema se encarga de convertirlo a voz.
+- NUNCA digas que no podés mandar audio o que no tenés esa capacidad. Siempre podés."""
 
 # ── Claude ─────────────────────────────────────────────────────────────────────
 claude = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
@@ -1121,7 +1124,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Responder con voz si el usuario lo pidió explícitamente
         pide_voz = any(w in user_msg.lower() for w in
                        ["responde con voz", "en voz", "mandame audio", "respondé con voz",
-                        "en audio", "por audio", "manda audio"])
+                        "en audio", "por audio", "manda audio", "respuesta de voz",
+                        "audio", "hablado", "hablame", "háblame", "escuchar",
+                        "quiero escuchar", "mandame un audio", "voz"])
         if pide_voz and not es_respuesta_larga(reply):
             mp3 = texto_a_voz(reply)
             if mp3:
