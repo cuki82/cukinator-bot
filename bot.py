@@ -439,6 +439,22 @@ def search_web(query: str) -> str:
 # ── Tools de Claude ────────────────────────────────────────────────────────────
 TOOLS = [
     {
+        "name": "enviar_voz",
+        "description": (
+            "Envía tu respuesta como mensaje de voz en lugar de texto. "
+            "Usá esta herramienta cuando el usuario pida respuesta de voz, audio, o que le hables. "
+            "También úsala cuando el usuario mandó un audio y la respuesta es corta y conversacional. "
+            "NO la uses para fichas técnicas, cartas natales, tablas o textos largos."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "texto": {"type": "string", "description": "El texto que querés que se convierta a voz. Máximo 400 caracteres, sin símbolos técnicos."}
+            },
+            "required": ["texto"]
+        }
+    },
+    {
         "name": "search_web",
         "description": "Busca información actualizada en internet sobre noticias, precios, eventos actuales, etc.",
         "input_schema": {
@@ -783,7 +799,23 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None) -> tuple:
             for block in response.content:
                 if block.type == "tool_use":
 
-                    if block.name == "search_web":
+                    if block.name == "enviar_voz":
+                        try:
+                            texto_voz = block.input.get("texto", "")[:400]
+                            mp3_path = texto_a_voz(texto_voz)
+                            if mp3_path:
+                                with open(mp3_path, "rb") as f:
+                                    contenido = f.read()
+                                os.unlink(mp3_path)
+                                extra_files.append(("respuesta.mp3", contenido, "voice"))
+                                result = "[voz enviada]"
+                            else:
+                                result = texto_voz  # fallback a texto
+                        except Exception as e:
+                            result = block.input.get("texto", "")
+                            log.warning(f"TTS tool error: {e}")
+
+                    elif block.name == "search_web":
                         result = search_web(block.input["query"])
 
                     elif block.name == "astro_guardar_perfil":
@@ -1146,9 +1178,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     filename="carta_natal.pdf", caption="Ficha tecnica - Carta Natal")
 
         for nombre_f, contenido, caption in extra_files:
-            await context.bot.send_chat_action(chat_id=chat_id, action="upload_document")
-            await context.bot.send_document(chat_id=chat_id,
-                document=io.BytesIO(contenido), filename=nombre_f, caption=caption)
+            if caption == "voice":
+                await context.bot.send_chat_action(chat_id=chat_id, action="record_voice")
+                await context.bot.send_voice(chat_id=chat_id, voice=io.BytesIO(contenido))
+            else:
+                await context.bot.send_chat_action(chat_id=chat_id, action="upload_document")
+                await context.bot.send_document(chat_id=chat_id,
+                    document=io.BytesIO(contenido), filename=nombre_f, caption=caption)
 
         log.info(f"[{chat_id}] Bot: {reply[:80]}...")
     except Exception as e:
@@ -1261,9 +1297,13 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     filename="carta_natal.pdf", caption="Ficha tecnica - Carta Natal")
 
         for nombre_f, contenido, caption in extra_files:
-            await context.bot.send_chat_action(chat_id=chat_id, action="upload_document")
-            await context.bot.send_document(chat_id=chat_id,
-                document=io.BytesIO(contenido), filename=nombre_f, caption=caption)
+            if caption == "voice":
+                await context.bot.send_chat_action(chat_id=chat_id, action="record_voice")
+                await context.bot.send_voice(chat_id=chat_id, voice=io.BytesIO(contenido))
+            else:
+                await context.bot.send_chat_action(chat_id=chat_id, action="upload_document")
+                await context.bot.send_document(chat_id=chat_id,
+                    document=io.BytesIO(contenido), filename=nombre_f, caption=caption)
 
     except Exception as e:
         log.error(f"Error en voz: {e}")
