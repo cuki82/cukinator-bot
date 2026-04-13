@@ -1870,6 +1870,7 @@ async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
          InlineKeyboardButton("📅  Calendario",   callback_data="menu:calendar")],
         [InlineKeyboardButton("⭐  Astrología",   callback_data="menu:astro"),
          InlineKeyboardButton("🎤  Voz",           callback_data="menu:voz")],
+        [InlineKeyboardButton("📚  Biblioteca",   callback_data="menu:biblioteca")],
         [InlineKeyboardButton("🔧  Sistema",       callback_data="menu:sistema")],
     ])
     await update.message.reply_text("¿Qué querés hacer?", reply_markup=teclado)
@@ -1889,6 +1890,7 @@ async def handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYP
              InlineKeyboardButton("📅  Calendario",   callback_data="menu:calendar")],
             [InlineKeyboardButton("⭐  Astrología",   callback_data="menu:astro"),
              InlineKeyboardButton("🎤  Voz",           callback_data="menu:voz")],
+            [InlineKeyboardButton("📚  Biblioteca",   callback_data="menu:biblioteca")],
             [InlineKeyboardButton("🔧  Sistema",       callback_data="menu:sistema")],
         ])
         await query.edit_message_text("¿Qué querés hacer?", reply_markup=teclado)
@@ -1929,6 +1931,10 @@ async def handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             *BACK
         ])
         await query.edit_message_text("🎤 Voz — ¿qué hacemos?", reply_markup=teclado)
+
+    elif data == "menu:biblioteca":
+        # Redirigir al handler de biblioteca mostrando el menú principal de KB
+        await _lib_show_main(query, context, is_query=True)
 
     elif data == "menu:sistema":
         teclado = InlineKeyboardMarkup([
