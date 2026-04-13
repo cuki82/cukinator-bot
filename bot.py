@@ -298,6 +298,8 @@ def texto_a_voz(texto: str, lang: str = "es") -> str | None:
     clean = re.sub(r'\s+', ' ', clean).strip()
     if not clean:
         return None
+    # Pronunciación correcta del nombre del bot
+    clean = re.sub(r'(?i)cukinator', 'Cukineitor', clean)
     log.info(f"TTS: '{clean[:60]}'")
 
     # Intentar ElevenLabs primero
