@@ -1236,8 +1236,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_message_full(chat_id, "user",      user_msg, db_path=DB_PATH)
         save_message_full(chat_id, "assistant", reply,    db_path=DB_PATH)
 
-        # Enviar texto (solo si no es "[voz enviada]" puro)
-        if reply and reply.strip() != "[voz enviada]":
+        # Para mensajes de TEXTO: voz solo si el usuario la pidió explícitamente
+        pidio_voz_explicito = any(w in user_msg.lower() for w in
+            ["voz", "audio", "escuchar", "hablame", "háblame", "respondé con voz",
+             "responde con voz", "mandame un audio", "en audio"])
+        if not pidio_voz_explicito:
+            extra_files = [(n, c, cap) for n, c, cap in extra_files if cap != "voice"]
+
+        # Enviar texto siempre (salvo que SOLO haya voz)
+        tiene_voz_explícita = any(cap == "voice" for _, _, cap in extra_files)
+        if reply and (not tiene_voz_explícita or reply.strip() != "[voz enviada]"):
             await send_long_message(context.bot, chat_id, reply, reply_to=update.message)
 
         if pdf_path:
