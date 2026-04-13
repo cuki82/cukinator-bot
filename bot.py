@@ -1179,14 +1179,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_document(chat_id=chat_id, document=f,
                     filename="carta_natal.pdf", caption="Ficha tecnica - Carta Natal")
 
+        log.info(f"[{chat_id}] extra_files: {[(n,cap,len(c)) for n,c,cap in extra_files]}")
         for nombre_f, contenido, caption in extra_files:
-            if caption == "voice":
-                await context.bot.send_chat_action(chat_id=chat_id, action="record_voice")
-                await context.bot.send_voice(chat_id=chat_id, voice=io.BytesIO(contenido))
-            else:
-                await context.bot.send_chat_action(chat_id=chat_id, action="upload_document")
-                await context.bot.send_document(chat_id=chat_id,
-                    document=io.BytesIO(contenido), filename=nombre_f, caption=caption)
+            try:
+                if caption == "voice":
+                    await context.bot.send_chat_action(chat_id=chat_id, action="record_voice")
+                    await context.bot.send_voice(chat_id=chat_id, voice=io.BytesIO(contenido))
+                    log.info(f"[{chat_id}] Voz enviada OK: {len(contenido)} bytes")
+                else:
+                    await context.bot.send_chat_action(chat_id=chat_id, action="upload_document")
+                    await context.bot.send_document(chat_id=chat_id,
+                        document=io.BytesIO(contenido), filename=nombre_f, caption=caption)
+            except Exception as ve:
+                log.error(f"[{chat_id}] Error enviando {caption}: {ve}")
 
         log.info(f"[{chat_id}] Bot: {reply[:80]}...")
     except Exception as e:
@@ -1302,15 +1307,19 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_document(chat_id=chat_id, document=f,
                     filename="carta_natal.pdf", caption="Ficha tecnica - Carta Natal")
 
+        log.info(f"[{chat_id}] handle_voice extra_files: {[(n,cap,len(c)) for n,c,cap in extra_files]}")
         for nombre_f, contenido, caption in extra_files:
-            if caption == "voice":
-                await context.bot.send_chat_action(chat_id=chat_id, action="record_voice")
-                await context.bot.send_voice(chat_id=chat_id, voice=io.BytesIO(contenido))
-                log.info(f"[{chat_id}] Voz enviada: {len(contenido)} bytes")
-            else:
-                await context.bot.send_chat_action(chat_id=chat_id, action="upload_document")
-                await context.bot.send_document(chat_id=chat_id,
-                    document=io.BytesIO(contenido), filename=nombre_f, caption=caption)
+            try:
+                if caption == "voice":
+                    await context.bot.send_chat_action(chat_id=chat_id, action="record_voice")
+                    await context.bot.send_voice(chat_id=chat_id, voice=io.BytesIO(contenido))
+                    log.info(f"[{chat_id}] Voz enviada OK: {len(contenido)} bytes")
+                else:
+                    await context.bot.send_chat_action(chat_id=chat_id, action="upload_document")
+                    await context.bot.send_document(chat_id=chat_id,
+                        document=io.BytesIO(contenido), filename=nombre_f, caption=caption)
+            except Exception as ve:
+                log.error(f"[{chat_id}] Error enviando {caption}: {ve}")
 
     except Exception as e:
         log.error(f"Error en voz: {e}")
