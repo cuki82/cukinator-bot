@@ -1224,14 +1224,31 @@ VIDEOS — REGLA CRÍTICA:
 # ── Claude ─────────────────────────────────────────────────────────────────────
 claude = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
+OWNER_CHAT_ID = 8626420783  # único usuario con acceso a Gmail, Calendar y datos personales
+
 def get_system_prompt(user_name: str = None, chat_id: int = None) -> str:
     import datetime
     hoy = datetime.datetime.now().strftime("%d de %B de %Y")
     prompt = SYSTEM_PROMPT.replace("{{FECHA_HOY}}", hoy)
+    is_owner = (chat_id == OWNER_CHAT_ID)
 
-    # Inyectar nombre del usuario si está disponible
     if user_name:
         prompt += f"\n\nUSUARIO ACTUAL: Te estás comunicando con {user_name}. Usá ese nombre cuando te dirijas a él/ella. NUNCA uses otro nombre."
+
+    if is_owner:
+        prompt += (
+            "\n\nMODO OWNER: Este usuario es el dueño del bot. "
+            "Tiene acceso a Gmail, Calendar, GitHub, datos personales y configuración del sistema. "
+            "Su email es cmromanelli@gmail.com — usalo cuando diga 'enviame a mí'."
+        )
+    else:
+        prompt += (
+            "\n\nMODO INVITADO: Este usuario NO es el dueño del bot. "
+            "NO tenés acceso a Gmail, Calendar, datos personales ni configuración del sistema. "
+            "Si preguntan por emails, calendario o datos privados, decí que esas funciones son solo para el administrador. "
+            "Nunca menciones ni uses el email cmromanelli@gmail.com ni ningún dato personal del owner. "
+            "Podés conversar, buscar en internet, hacer cartas natales, responder sobre clima y hora."
+        )
 
     return prompt
 
@@ -1247,7 +1264,21 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
     extra_files = []
 
     # Quitar enviar_voz si el usuario no pidió audio
-    tools_activos = [t for t in TOOLS if allow_voice or t["name"] != "enviar_voz"]
+    is_owner = (chat_id == OWNER_CHAT_ID)
+
+    # Tools restringidos al owner
+    OWNER_ONLY_TOOLS = {
+        "gmail_leer", "gmail_enviar", "gmail_ver_email", "gmail_descargar_adjunto",
+        "calendar_ver", "calendar_crear",
+        "github_push", "config_guardar", "config_leer", "config_listar",
+        "agent_guardar_secret", "agent_registrar_skill", "agent_log",
+    }
+
+    tools_activos = [
+        t for t in TOOLS
+        if (allow_voice or t["name"] != "enviar_voz")
+        and (is_owner or t["name"] not in OWNER_ONLY_TOOLS)
+    ]
 
     while True:
         response = claude.messages.create(
