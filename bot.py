@@ -1465,6 +1465,157 @@ async def cmd_testvoice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log.error(f"[{chat_id}] /testvoice error: {e}")
         await update.message.reply_text(f"Error en voz: {e}")
 
+async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Menú principal con todos los comandos organizados."""
+    teclado = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📧  Gmail",        callback_data="menu:gmail"),
+         InlineKeyboardButton("📅  Calendario",   callback_data="menu:calendar")],
+        [InlineKeyboardButton("⭐  Astrología",   callback_data="menu:astro"),
+         InlineKeyboardButton("🎤  Voz",           callback_data="menu:voz")],
+        [InlineKeyboardButton("🔧  Sistema",       callback_data="menu:sistema")],
+    ])
+    await update.message.reply_text("¿Qué querés hacer?", reply_markup=teclado)
+
+
+async def handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data    = query.data
+    chat_id = query.message.chat_id
+
+    BACK = [[InlineKeyboardButton("← Volver al menú", callback_data="menu:main")]]
+
+    if data == "menu:main":
+        teclado = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📧  Gmail",        callback_data="menu:gmail"),
+             InlineKeyboardButton("📅  Calendario",   callback_data="menu:calendar")],
+            [InlineKeyboardButton("⭐  Astrología",   callback_data="menu:astro"),
+             InlineKeyboardButton("🎤  Voz",           callback_data="menu:voz")],
+            [InlineKeyboardButton("🔧  Sistema",       callback_data="menu:sistema")],
+        ])
+        await query.edit_message_text("¿Qué querés hacer?", reply_markup=teclado)
+
+    elif data == "menu:gmail":
+        teclado = InlineKeyboardMarkup([
+            [InlineKeyboardButton("Ver inbox",             callback_data="menu:act:gmail_inbox")],
+            [InlineKeyboardButton("Mails de hoy",          callback_data="menu:act:gmail_hoy")],
+            [InlineKeyboardButton("Mails no leídos",       callback_data="menu:act:gmail_unread")],
+            [InlineKeyboardButton("Resumen de la semana",  callback_data="menu:act:gmail_semana")],
+            [InlineKeyboardButton("Enviar un mail",        callback_data="menu:act:gmail_send")],
+            *BACK
+        ])
+        await query.edit_message_text("📧 Gmail — ¿qué hacemos?", reply_markup=teclado)
+
+    elif data == "menu:calendar":
+        teclado = InlineKeyboardMarkup([
+            [InlineKeyboardButton("Ver esta semana",       callback_data="menu:act:cal_semana")],
+            [InlineKeyboardButton("Ver este mes",          callback_data="menu:act:cal_mes")],
+            [InlineKeyboardButton("Crear un evento",       callback_data="menu:act:cal_crear")],
+            *BACK
+        ])
+        await query.edit_message_text("📅 Calendario — ¿qué hacemos?", reply_markup=teclado)
+
+    elif data == "menu:astro":
+        teclado = InlineKeyboardMarkup([
+            [InlineKeyboardButton("Ver mis cartas guardadas", callback_data="menu:act:astro_lista")],
+            [InlineKeyboardButton("Calcular carta natal",     callback_data="menu:act:astro_calc")],
+            [InlineKeyboardButton("Ficha técnica completa",   callback_data="menu:act:astro_ficha")],
+            *BACK
+        ])
+        await query.edit_message_text("⭐ Astrología — ¿qué hacemos?", reply_markup=teclado)
+
+    elif data == "menu:voz":
+        teclado = InlineKeyboardMarkup([
+            [InlineKeyboardButton("Cambiar voz del bot",   callback_data="menu:act:voz_menu")],
+            [InlineKeyboardButton("Escuchar voz actual",   callback_data="menu:act:voz_test")],
+            *BACK
+        ])
+        await query.edit_message_text("🎤 Voz — ¿qué hacemos?", reply_markup=teclado)
+
+    elif data == "menu:sistema":
+        teclado = InlineKeyboardMarkup([
+            [InlineKeyboardButton("Ver configuraciones",   callback_data="menu:act:sys_config")],
+            [InlineKeyboardButton("Ver perfiles astro",    callback_data="menu:act:sys_perfiles")],
+            [InlineKeyboardButton("Estadísticas memoria",  callback_data="menu:act:sys_stats")],
+            [InlineKeyboardButton("Borrar historial",      callback_data="menu:act:sys_reset")],
+            *BACK
+        ])
+        await query.edit_message_text("🔧 Sistema — ¿qué hacemos?", reply_markup=teclado)
+
+    elif data.startswith("menu:act:"):
+        accion = data.split(":", 2)[2]
+        acciones = {
+            "gmail_inbox":  "Mostrá mis últimos mails del inbox",
+            "gmail_hoy":    "Mostrá los mails que recibí hoy",
+            "gmail_unread": "Mostrá mis mails no leídos",
+            "gmail_semana": "Hacé un resumen de mis mails de la última semana",
+            "gmail_send":   "Quiero enviar un mail",
+            "cal_semana":   "Mostrá mis eventos de esta semana",
+            "cal_mes":      "Mostrá mis eventos de este mes",
+            "cal_crear":    "Quiero crear un evento en el calendario",
+            "astro_lista":  "Mostrá la lista de cartas astrológicas guardadas",
+            "astro_calc":   "Quiero calcular una carta natal",
+            "astro_ficha":  "Quiero la ficha técnica completa de una carta",
+        }
+        if accion == "voz_menu":
+            await query.edit_message_text("Abriendo menú de voz...")
+            await cmd_voz_desde_callback(chat_id, context)
+            return
+        elif accion == "voz_test":
+            await query.edit_message_text("Generando audio...")
+            ogg = texto_a_voz("Hola, esta es la voz activa de Cuki.")
+            if ogg:
+                with open(ogg, "rb") as f:
+                    await context.bot.send_voice(chat_id=chat_id, voice=f)
+                os.unlink(ogg)
+            return
+        elif accion == "sys_config":
+            configs = list_configs(db_path=DB_PATH)
+            lines = [f"{c['namespace']}.{c['key']} v{c['version']}" for c in configs[:15]]
+            await query.edit_message_text("Configuraciones:\n" + "\n".join(lines))
+            return
+        elif accion == "sys_perfiles":
+            perfiles = astro_listar(chat_id)
+            if not perfiles:
+                await query.edit_message_text("No hay perfiles astrológicos guardados.")
+            else:
+                lines = [f"• {p['nombre'].title()} — {p['fecha']} {p['hora']}" for p in perfiles]
+                await query.edit_message_text("Perfiles guardados:\n" + "\n".join(lines))
+            return
+        elif accion == "sys_stats":
+            from memory_store import get_memory_stats
+            stats = get_memory_stats(chat_id, DB_PATH)
+            await query.edit_message_text(
+                f"Memoria:\n• {stats['messages']} mensajes\n• {stats['sessions']} sesiones\n"
+                f"• {stats['memory_facts']} hechos\n• {stats['persons']} personas"
+            )
+            return
+        elif accion == "sys_reset":
+            clear_history(chat_id)
+            clear_chat_history(chat_id, DB_PATH)
+            await query.edit_message_text("Historial borrado.")
+            return
+
+        # Para las acciones que generan texto: enviar como mensaje al chat
+        texto_accion = acciones.get(accion, "")
+        if texto_accion:
+            await query.edit_message_text(f"Ejecutando: {texto_accion}...")
+            await context.bot.send_message(chat_id=chat_id, text=texto_accion)
+
+
+async def cmd_voz_desde_callback(chat_id: int, context):
+    """Envía el menú de voz como mensaje nuevo."""
+    activa  = get_voz_activa()
+    botones = []
+    for voice_id, nombre, _ in VOCES_CATALOG:
+        marca = "✅ " if voice_id == activa else ""
+        botones.append([InlineKeyboardButton(f"{marca}{nombre}", callback_data=f"voz:set:{voice_id}")])
+    botones.append([InlineKeyboardButton("🎧 Escuchar preview", callback_data="voz:preview")])
+    botones.append([InlineKeyboardButton("Cerrar", callback_data="voz:cerrar")])
+    await context.bot.send_message(chat_id=chat_id, text="Elegí la voz del bot:",
+        reply_markup=InlineKeyboardMarkup(botones))
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name = update.effective_user.first_name or ""
     await update.message.reply_text(
@@ -1599,8 +1750,10 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("cartas",    cmd_cartas))
     app.add_handler(CommandHandler("testvoice", cmd_testvoice))
     app.add_handler(CommandHandler("voz",       cmd_voz))
-    app.add_handler(CallbackQueryHandler(handle_voz_callback, pattern="^voz:"))
-    app.add_handler(CallbackQueryHandler(handle_callback,     pattern="^astro:"))
+    app.add_handler(CommandHandler("menu",      cmd_menu))
+    app.add_handler(CallbackQueryHandler(handle_menu_callback, pattern="^menu:"))
+    app.add_handler(CallbackQueryHandler(handle_voz_callback,  pattern="^voz:"))
+    app.add_handler(CallbackQueryHandler(handle_callback,      pattern="^astro:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
     log.info("✅ Bot en línea.")
