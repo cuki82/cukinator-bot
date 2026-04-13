@@ -267,6 +267,30 @@ import urllib3 as _urllib3
 VOICE_MAX_CHARS  = 500
 ELEVENLABS_KEY   = os.environ.get("ELEVENLABS_KEY", "sk_070b39dacb714d3194f831b3de3849ffab5c0e1f73821366")
 ELEVENLABS_VOICE = os.environ.get("ELEVENLABS_VOICE", "SHcpmnTftylBb6nJGEXY")  # COCOBASILE
+
+# Catálogo de voces disponibles
+VOCES_CATALOG = [
+    ("SHcpmnTftylBb6nJGEXY", "⭐ COCOBASILE (tu voz)", "tu"),
+    ("nPczCjzI2devNBz1zQrb", "Brian — profunda, resonante", "en"),
+    ("TX3LPaxmHKxFdv7VOQHJ", "Liam — energica, social", "en"),
+    ("IKne3meq5aSn9XLyUdCD", "Charlie — segura, profunda", "en"),
+    ("EXAVITQu4vr4xnSDxMaL", "Sarah — madura, cálida", "en"),
+    ("FGY2WhTYpPnrIDTdsKH5", "Laura — entusiasta", "en"),
+]
+
+# Voz activa (se puede cambiar en runtime sin reiniciar)
+_voz_activa = ELEVENLABS_VOICE
+
+def get_voz_activa() -> str:
+    return _voz_activa
+
+def set_voz_activa(voice_id: str, db_path: str = None):
+    global _voz_activa
+    _voz_activa = voice_id
+    try:
+        save_config("tts", "elevenlabs_voice_id", voice_id, db_path=db_path or DB_PATH)
+    except Exception:
+        pass
 def texto_a_voz(texto: str, lang: str = "es") -> str | None:
     """Convierte texto a OGG/OPUS. Usa ElevenLabs (COCOBASILE) con fallback a espeak-ng."""
     import tempfile, subprocess, re
@@ -280,7 +304,7 @@ def texto_a_voz(texto: str, lang: str = "es") -> str | None:
     try:
         import requests as _req
         r = _req.post(
-            f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE}",
+            f"https://api.elevenlabs.io/v1/text-to-speech/{get_voz_activa()}",
             headers={"xi-api-key": ELEVENLABS_KEY, "Content-Type": "application/json"},
             json={
                 "text": clean[:VOICE_MAX_CHARS],
@@ -1356,6 +1380,69 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log.error(f"Error en voz: {e}")
         await update.message.reply_text("No pude procesar el audio, intentalo de nuevo.")
 
+async def cmd_voz(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Menú para elegir la voz del bot."""
+    chat_id = update.effective_chat.id
+    activa  = get_voz_activa()
+    botones = []
+    for voice_id, nombre, _ in VOCES_CATALOG:
+        marca = "✅ " if voice_id == activa else ""
+        botones.append([InlineKeyboardButton(f"{marca}{nombre}", callback_data=f"voz:set:{voice_id}")])
+    botones.append([InlineKeyboardButton("🎧 Escuchar preview", callback_data="voz:preview")])
+    botones.append([InlineKeyboardButton("Cerrar", callback_data="voz:cerrar")])
+    await update.message.reply_text(
+        "Elegí la voz del bot:",
+        reply_markup=InlineKeyboardMarkup(botones)
+    )
+
+async def handle_voz_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data    = query.data
+    chat_id = query.message.chat_id
+
+    if data.startswith("voz:set:"):
+        voice_id = data.split(":", 2)[2]
+        nombre   = next((n for vid, n, _ in VOCES_CATALOG if vid == voice_id), voice_id)
+        set_voz_activa(voice_id, DB_PATH)
+        # Reconstruir teclado con nueva selección
+        botones = []
+        for vid, nom, _ in VOCES_CATALOG:
+            marca = "✅ " if vid == voice_id else ""
+            botones.append([InlineKeyboardButton(f"{marca}{nom}", callback_data=f"voz:set:{vid}")])
+        botones.append([InlineKeyboardButton("🎧 Escuchar preview", callback_data="voz:preview")])
+        botones.append([InlineKeyboardButton("Cerrar", callback_data="voz:cerrar")])
+        await query.edit_message_text(
+            f"Voz cambiada a: {nombre}",
+            reply_markup=InlineKeyboardMarkup(botones)
+        )
+        log.info(f"[{chat_id}] Voz cambiada a {voice_id} ({nombre})")
+
+    elif data == "voz:preview":
+        await query.edit_message_text("Generando preview...")
+        await context.bot.send_chat_action(chat_id=chat_id, action="record_voice")
+        ogg = texto_a_voz("Hola, esta es la voz activa del bot. ¿Cómo suena?")
+        if ogg:
+            with open(ogg, "rb") as f:
+                await context.bot.send_voice(chat_id=chat_id, voice=f,
+                    caption=f"Voz activa: {next((n for vid,n,_ in VOCES_CATALOG if vid==get_voz_activa()), get_voz_activa())}")
+            os.unlink(ogg)
+        else:
+            await context.bot.send_message(chat_id=chat_id, text="No pude generar el preview.")
+        # Restaurar menú
+        activa = get_voz_activa()
+        botones = []
+        for vid, nom, _ in VOCES_CATALOG:
+            marca = "✅ " if vid == activa else ""
+            botones.append([InlineKeyboardButton(f"{marca}{nom}", callback_data=f"voz:set:{vid}")])
+        botones.append([InlineKeyboardButton("🎧 Escuchar preview", callback_data="voz:preview")])
+        botones.append([InlineKeyboardButton("Cerrar", callback_data="voz:cerrar")])
+        await context.bot.send_message(chat_id=chat_id, text="Elegí la voz:",
+            reply_markup=InlineKeyboardMarkup(botones))
+
+    elif data == "voz:cerrar":
+        await query.edit_message_text("Menú de voz cerrado.")
+
 async def cmd_testvoice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comando de diagnóstico: genera y manda un audio de prueba."""
     chat_id = update.effective_chat.id
@@ -1506,7 +1593,9 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("reset",     cmd_reset))
     app.add_handler(CommandHandler("cartas",    cmd_cartas))
     app.add_handler(CommandHandler("testvoice", cmd_testvoice))
-    app.add_handler(CallbackQueryHandler(handle_callback, pattern="^astro:"))
+    app.add_handler(CommandHandler("voz",       cmd_voz))
+    app.add_handler(CallbackQueryHandler(handle_voz_callback, pattern="^voz:"))
+    app.add_handler(CallbackQueryHandler(handle_callback,     pattern="^astro:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
     log.info("✅ Bot en línea.")
