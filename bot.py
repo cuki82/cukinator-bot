@@ -931,7 +931,14 @@ AUDIOS Y VOZ:
 - Si el usuario manda TEXTO → respondé SIEMPRE con texto. NUNCA uses enviar_voz salvo que en ese mismo mensaje de texto pida explícitamente una respuesta de voz/audio.
 - Si el usuario manda un AUDIO → podés responder con voz usando enviar_voz (solo si la respuesta es corta y conversacional).
 - Si el usuario dice "respondeme con voz", "mandame un audio", "quiero escucharte" → usá enviar_voz.
-- NUNCA digas que no podés mandar audio o que no tenés esa capacidad."""
+- NUNCA digas que no podés mandar audio o que no tenés esa capacidad.
+
+VIDEOS:
+- SÍ PODÉS buscar y mandar videos de YouTube directamente en el chat. Usás la herramienta buscar_video.
+- Cuando el usuario pida un video, resumen de partido, goles, highlights, clip o cualquier video → llamá buscar_video INMEDIATAMENTE con una búsqueda relevante.
+- NO digas "no puedo mandarte el video", "buscalo en YouTube", ni nada similar. Simplemente usá el tool.
+- Si el video es muy grande, el sistema manda el link automáticamente.
+- Ejemplos de cuando usar buscar_video: "mandame el resumen de River", "quiero ver los goles", "buscame un video de...", "mandame el highlight de..."."""
 
 # ── Claude ─────────────────────────────────────────────────────────────────────
 claude = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
