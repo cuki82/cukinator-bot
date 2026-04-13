@@ -262,6 +262,36 @@ def clear_history(chat_id):
 
 # ── Google (Gmail + Calendar via Apps Script relay) ───────────────────────────
 import urllib3 as _urllib3
+
+# ── Text-to-Speech ─────────────────────────────────────────────────────────────
+VOICE_MAX_CHARS = 500  # respuestas más largas van como texto
+
+def texto_a_voz(texto: str, lang: str = "es") -> str | None:
+    """Convierte texto a MP3 usando gTTS. Retorna path al archivo o None si falla."""
+    try:
+        from gtts import gTTS
+        import tempfile
+        # Limpiar texto para TTS (quitar símbolos técnicos)
+        import re
+        clean = re.sub(r'[*_`#\|─╔╚╗╝═]', '', texto)
+        clean = re.sub(r'\s+', ' ', clean).strip()
+        if not clean:
+            return None
+        tts = gTTS(clean[:VOICE_MAX_CHARS], lang=lang, slow=False)
+        tmp = tempfile.mktemp(suffix=".mp3")
+        tts.save(tmp)
+        return tmp
+    except Exception as e:
+        log.warning(f"TTS error: {e}")
+        return None
+
+def es_respuesta_larga(texto: str) -> bool:
+    """Detecta si la respuesta es técnica/larga y no debería ir como voz."""
+    if len(texto) > VOICE_MAX_CHARS:
+        return True
+    keywords = ["Casa ", "Signo:", "## ", "ASC:", "MC:", "Cuspide", "Aspecto", "Planetas"]
+    return any(k in texto for k in keywords)
+
 _urllib3.disable_warnings()
 
 def gas_call(payload: dict, timeout: int = 25) -> dict:
@@ -1087,7 +1117,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply, pdf_path, extra_files = payload
         save_message_full(chat_id, "user",      user_msg, db_path=DB_PATH)
         save_message_full(chat_id, "assistant", reply,    db_path=DB_PATH)
-        await send_long_message(context.bot, chat_id, reply, reply_to=update.message)
+
+        # Responder con voz si el usuario lo pidió explícitamente
+        pide_voz = any(w in user_msg.lower() for w in
+                       ["responde con voz", "en voz", "mandame audio", "respondé con voz",
+                        "en audio", "por audio", "manda audio"])
+        if pide_voz and not es_respuesta_larga(reply):
+            mp3 = texto_a_voz(reply)
+            if mp3:
+                await context.bot.send_chat_action(chat_id=chat_id, action="record_voice")
+                with open(mp3, "rb") as f:
+                    await context.bot.send_voice(chat_id=chat_id, voice=f)
+                os.unlink(mp3)
+            else:
+                await send_long_message(context.bot, chat_id, reply, reply_to=update.message)
+        else:
+            await send_long_message(context.bot, chat_id, reply, reply_to=update.message)
 
         if pdf_path:
             await context.bot.send_chat_action(chat_id=chat_id, action="upload_document")
@@ -1189,7 +1234,20 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply, pdf_path, extra_files = payload
         save_message_full(chat_id, "user",      texto, db_path=DB_PATH)
         save_message_full(chat_id, "assistant", reply, db_path=DB_PATH)
-        await send_long_message(context.bot, chat_id, reply, reply_to=update.message)
+
+        # Si el usuario mandó audio y la respuesta es corta → responder con voz
+        if not es_respuesta_larga(reply):
+            mp3 = texto_a_voz(reply)
+            if mp3:
+                await context.bot.send_chat_action(chat_id=chat_id, action="record_voice")
+                with open(mp3, "rb") as f:
+                    await context.bot.send_voice(chat_id=chat_id, voice=f)
+                os.unlink(mp3)
+            else:
+                await send_long_message(context.bot, chat_id, reply, reply_to=update.message)
+        else:
+            # Respuesta larga → texto
+            await send_long_message(context.bot, chat_id, reply, reply_to=update.message)
 
         if pdf_path:
             await context.bot.send_chat_action(chat_id=chat_id, action="upload_document")
