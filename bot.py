@@ -267,7 +267,6 @@ import urllib3 as _urllib3
 VOICE_MAX_CHARS  = 500
 ELEVENLABS_KEY   = os.environ.get("ELEVENLABS_KEY", "sk_070b39dacb714d3194f831b3de3849ffab5c0e1f73821366")
 ELEVENLABS_VOICE = os.environ.get("ELEVENLABS_VOICE", "SHcpmnTftylBb6nJGEXY")  # COCOBASILE
-
 def texto_a_voz(texto: str, lang: str = "es") -> str | None:
     """Convierte texto a OGG/OPUS. Usa ElevenLabs (COCOBASILE) con fallback a espeak-ng."""
     import tempfile, subprocess, re
@@ -286,7 +285,13 @@ def texto_a_voz(texto: str, lang: str = "es") -> str | None:
             json={
                 "text": clean[:VOICE_MAX_CHARS],
                 "model_id": "eleven_multilingual_v2",
-                "voice_settings": {"stability": 0.5, "similarity_boost": 0.85}
+                "voice_settings": {
+                    "stability": 0.38,
+                    "similarity_boost": 0.92,
+                    "style": 0.4,
+                    "use_speaker_boost": True
+                },
+                "speed": 1.2
             },
             timeout=15
         )
