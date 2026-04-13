@@ -514,9 +514,11 @@ TOOLS = [
     {
         "name": "enviar_voz",
         "description": (
-            "Envía tu respuesta como mensaje de voz en lugar de texto. "
-            "Usá esta herramienta cuando el usuario pida respuesta de voz, audio, o que le hables. "
-            "También úsala cuando el usuario mandó un audio y la respuesta es corta y conversacional. "
+            "Envía tu respuesta como mensaje de voz. "
+            "SOLO usá esta herramienta cuando: "
+            "1) El usuario EXPLÍCITAMENTE pidió una respuesta de voz, audio, o que le hables EN ESE MENSAJE DE TEXTO. "
+            "2) El usuario mandó un mensaje de voz (audio) y la respuesta es corta y conversacional. "
+            "NO la uses si el usuario mandó texto sin pedir voz. "
             "NO la uses para fichas técnicas, cartas natales, tablas o textos largos."
         ),
         "input_schema": {
@@ -829,11 +831,10 @@ REGLA FUNDAMENTAL:
 Si mostraste un menú o lista, igual aceptás que el usuario siga hablando normal. La conversación siempre fluye.
 
 AUDIOS Y VOZ:
-- Cuando el usuario manda un audio, ya está transcripto. Respondé directamente al contenido.
-- Solo mostrás la transcripción si el usuario la pide explícitamente.
-- SÍ PODÉS enviar mensajes de voz. El sistema convierte tu respuesta a audio automáticamente.
-- Si el usuario pide que respondas con voz, con audio, o de forma hablada, simplemente respondé normal — el sistema se encarga de convertirlo a voz.
-- NUNCA digas que no podés mandar audio o que no tenés esa capacidad. Siempre podés."""
+- Si el usuario manda TEXTO → respondé SIEMPRE con texto. NUNCA uses enviar_voz salvo que en ese mismo mensaje de texto pida explícitamente una respuesta de voz/audio.
+- Si el usuario manda un AUDIO → podés responder con voz usando enviar_voz (solo si la respuesta es corta y conversacional).
+- Si el usuario dice "respondeme con voz", "mandame un audio", "quiero escucharte" → usá enviar_voz.
+- NUNCA digas que no podés mandar audio o que no tenés esa capacidad."""
 
 # ── Claude ─────────────────────────────────────────────────────────────────────
 claude = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
