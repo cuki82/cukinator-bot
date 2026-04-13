@@ -1192,6 +1192,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_msg = update.message.text
     name     = update.effective_user.first_name or "Usuario"
     log.info(f"[{chat_id}] {name}: {user_msg}")
+
+    # Trigger natural para el menú
+    if user_msg.strip().lower() in ("menu", "menú", "abri el menu", "abrí el menú", "ver menu", "ver menú"):
+        await cmd_menu(update, context)
+        return
+
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
     try:
