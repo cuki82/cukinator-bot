@@ -1637,12 +1637,14 @@ async def cmd_voz_desde_callback(chat_id: int, context):
         reply_markup=InlineKeyboardMarkup(botones))
 
 
+BOT_VERSION = "v2026.04.13-novoz"
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name = update.effective_user.first_name or ""
     await update.message.reply_text(
-        f"Hola {name}! Soy Cukinator. Puedo conversar, buscar en internet y calcular cartas natales astrológicas. "
-        f"Para la carta natal decime fecha, hora y lugar de nacimiento. "
-        f"Usá /reset para borrar el historial."
+        f"Hola {name}! Soy Cukinator {BOT_VERSION}. "
+        f"Puedo conversar, buscar en internet y calcular cartas natales. "
+        f"Escribí 'menu' para ver todas las opciones."
     )
 
 async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
