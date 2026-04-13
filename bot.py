@@ -986,45 +986,57 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
 
                     if block.name == "buscar_video":
                         try:
-                            import yt_dlp as _ytdlp
                             query   = block.input["query"]
                             max_dur = block.input.get("max_duration", 900)
-
                             log.info(f"[{chat_id}] Buscando video: {query}")
+                            titulo, url, canal, mins, segs = None, None, None, 0, 0
 
-                            info_opts = {
-                                "quiet": True, "no_warnings": True,
-                                "noplaylist": True, "nocheckcertificate": True,
-                            }
-                            with _ytdlp.YoutubeDL(info_opts) as ydl:
-                                info = ydl.extract_info(f"ytsearch3:{query}", download=False)
+                            # Intentar con yt-dlp primero
+                            try:
+                                import yt_dlp as _ytdlp
+                                info_opts = {"quiet":True,"no_warnings":True,"noplaylist":True,"nocheckcertificate":True}
+                                with _ytdlp.YoutubeDL(info_opts) as ydl:
+                                    info = ydl.extract_info(f"ytsearch3:{query}", download=False)
+                                entries = [e for e in (info.get("entries") or []) if e and e.get("duration",0) <= max_dur]
+                                if not entries and info.get("entries"):
+                                    entries = info["entries"][:1]
+                                if entries:
+                                    v      = entries[0]
+                                    titulo = v.get("title","")
+                                    url    = v.get("webpage_url","")
+                                    canal  = v.get("uploader","")
+                                    dur    = int(v.get("duration",0) or 0)
+                                    mins, segs = dur//60, dur%60
+                            except Exception as yt_err:
+                                log.warning(f"yt-dlp no disponible: {yt_err} — usando DuckDuckGo")
 
-                            if not info or not info.get("entries"):
+                            # Fallback: buscar con DuckDuckGo si yt-dlp falló
+                            if not url:
+                                try:
+                                    from ddgs import DDGS
+                                    with DDGS() as ddgs:
+                                        hits = list(ddgs.text(f"site:youtube.com {query}", max_results=3, backend="duckduckgo"))
+                                    if hits:
+                                        titulo = hits[0].get("title","Video")
+                                        url    = hits[0].get("href","")
+                                        canal  = ""
+                                        mins, segs = 0, 0
+                                except Exception as ddg_err:
+                                    log.warning(f"DuckDuckGo fallback error: {ddg_err}")
+
+                            if not url:
                                 result = f"No encontré videos para: {query}"
                             else:
-                                # Tomar el más relevante (primero)
-                                entries = [e for e in info["entries"] if e and e.get("duration", 0) <= max_dur]
-                                if not entries:
-                                    entries = info["entries"][:1]
-                                video   = entries[0]
-                                titulo  = video.get("title", "Video")
-                                url     = video.get("webpage_url", "")
-                                dur_seg = int(video.get("duration", 0) or 0)
-                                canal   = video.get("uploader", "")
-                                mins    = dur_seg // 60
-                                segs    = dur_seg % 60
-
-                                # Mandar link — Telegram genera preview automático
-                                # También agregar como mensaje especial que el handler envía
+                                meta = f"{canal} | {mins}:{segs:02d}" if canal and mins else canal or ""
                                 extra_files.append((
                                     "video_link",
-                                    f"{titulo}\n{url}\n{canal} | {mins}:{segs:02d}".encode(),
+                                    f"{titulo}\n{url}\n{meta}".encode(),
                                     "video_link"
                                 ))
-                                result = f"[video encontrado: {titulo} ({mins}:{segs:02d})]"
-                                log.info(f"[{chat_id}] Video encontrado: {titulo} | {url}")
+                                result = f"[video encontrado: {titulo}]"
+                                log.info(f"[{chat_id}] Video: {titulo} | {url}")
                         except Exception as e:
-                            result = f"Error descargando video: {e}"
+                            result = f"Error buscando video: {e}"
                             log.error(f"buscar_video error: {e}")
 
                     elif block.name == "enviar_voz":
