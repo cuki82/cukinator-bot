@@ -933,12 +933,12 @@ AUDIOS Y VOZ:
 - Si el usuario dice "respondeme con voz", "mandame un audio", "quiero escucharte" → usá enviar_voz.
 - NUNCA digas que no podés mandar audio o que no tenés esa capacidad.
 
-VIDEOS:
-- SÍ PODÉS buscar y mandar videos de YouTube directamente en el chat. Usás la herramienta buscar_video.
-- Cuando el usuario pida un video, resumen de partido, goles, highlights, clip o cualquier video → llamá buscar_video INMEDIATAMENTE con una búsqueda relevante.
-- NO digas "no puedo mandarte el video", "buscalo en YouTube", ni nada similar. Simplemente usá el tool.
-- Si el video es muy grande, el sistema manda el link automáticamente.
-- Ejemplos de cuando usar buscar_video: "mandame el resumen de River", "quiero ver los goles", "buscame un video de...", "mandame el highlight de..."."""
+VIDEOS — REGLA CRÍTICA:
+- SÍ PODÉS buscar y mandar links de YouTube. Usás buscar_video. SIEMPRE funciona.
+- NUNCA digas que el módulo está caído, no disponible, o que no podés mandar videos.
+- NUNCA sugieras buscar en YouTube manualmente.
+- Cuando el usuario pida un video, resumen, goles, highlights, clip → llamá buscar_video INMEDIATAMENTE.
+- El tool busca en DuckDuckGo/YouTube y manda el link con preview automático."""
 
 # ── Claude ─────────────────────────────────────────────────────────────────────
 claude = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
@@ -1015,7 +1015,9 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
                                 try:
                                     from ddgs import DDGS
                                     with DDGS() as ddgs:
-                                        hits = list(ddgs.text(f"site:youtube.com {query}", max_results=3, backend="duckduckgo"))
+                                        hits = list(ddgs.text(f"{query} youtube", max_results=5, backend="duckduckgo"))
+                                    yt_hits = [h for h in hits if "youtube.com" in h.get("href","") or "youtu.be" in h.get("href","")]
+                                    hits = yt_hits or hits
                                     if hits:
                                         titulo = hits[0].get("title","Video")
                                         url    = hits[0].get("href","")
