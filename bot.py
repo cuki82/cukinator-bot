@@ -713,12 +713,18 @@ AUDIOS:
 # ── Claude ─────────────────────────────────────────────────────────────────────
 claude = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
-def get_system_prompt() -> str:
+def get_system_prompt(user_name: str = None, chat_id: int = None) -> str:
     import datetime
     hoy = datetime.datetime.now().strftime("%d de %B de %Y")
-    return SYSTEM_PROMPT.replace("{{FECHA_HOY}}", hoy)
+    prompt = SYSTEM_PROMPT.replace("{{FECHA_HOY}}", hoy)
 
-def ask_claude(chat_id: int, user_text: str) -> tuple:
+    # Inyectar nombre del usuario si está disponible
+    if user_name:
+        prompt += f"\n\nUSUARIO ACTUAL: Te estás comunicando con {user_name}. Usá ese nombre cuando te dirijas a él/ella. NUNCA uses otro nombre."
+
+    return prompt
+
+def ask_claude(chat_id: int, user_text: str, user_name: str = None) -> tuple:
     """Retorna (respuesta_texto, pdf_path_o_None, archivos_extra)
        archivos_extra = lista de (nombre, bytes, caption)
     """
@@ -732,7 +738,7 @@ def ask_claude(chat_id: int, user_text: str) -> tuple:
         response = claude.messages.create(
             model="claude-opus-4-5",
             max_tokens=2048,
-            system=get_system_prompt(),
+            system=get_system_prompt(user_name=user_name, chat_id=chat_id),
             tools=TOOLS,
             messages=messages
         )
@@ -1051,7 +1057,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         def run_claude():
             try:
-                q.put(("ok", ask_claude(chat_id, user_msg)))
+                q.put(("ok", ask_claude(chat_id, user_msg, user_name=name)))
             except Exception as e:
                 q.put(("err", str(e)))
 
@@ -1152,7 +1158,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         def run_claude():
             try:
-                q.put(("ok", ask_claude(chat_id, texto)))
+                q.put(("ok", ask_claude(chat_id, texto, user_name=name)))
             except Exception as e:
                 q.put(("err", str(e)))
 
