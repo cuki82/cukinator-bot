@@ -517,6 +517,23 @@ def search_web(query: str) -> str:
 # ── Tools de Claude ────────────────────────────────────────────────────────────
 TOOLS = [
     {
+        "name": "buscar_video",
+        "description": (
+            "Busca y descarga un video de YouTube para enviarlo al usuario. "
+            "Usá cuando el usuario pida un video, resumen de partido, clip, highlight o similar. "
+            "Descarga en baja resolución (480p max) para respetar el límite de 50MB de Telegram. "
+            "Si el video es muy grande, envía el link en su lugar."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Búsqueda para YouTube (ej: 'River Plate resumen partido ayer 2026')"},
+                "max_duration": {"type": "integer", "description": "Duración máxima en segundos (default 600 = 10 min)"}
+            },
+            "required": ["query"]
+        }
+    },
+    {
         "name": "enviar_voz",
         "description": (
             "Envía tu respuesta como mensaje de voz. "
@@ -960,7 +977,73 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
             for block in response.content:
                 if block.type == "tool_use":
 
-                    if block.name == "enviar_voz":
+                    if block.name == "buscar_video":
+                        try:
+                            import yt_dlp as _ytdlp, tempfile as _tmp
+                            query       = block.input["query"]
+                            max_dur     = block.input.get("max_duration", 600)
+                            tmp_dir     = _tmp.mkdtemp()
+                            MAX_BYTES   = 48 * 1024 * 1024  # 48MB
+
+                            log.info(f"[{chat_id}] Buscando video: {query}")
+
+                            # Primero buscar sin descargar para obtener info
+                            info_opts = {
+                                "quiet": True, "no_warnings": True,
+                                "noplaylist": True, "nocheckcertificate": True,
+                            }
+                            with _ytdlp.YoutubeDL(info_opts) as ydl:
+                                info = ydl.extract_info(f"ytsearch1:{query}", download=False)
+
+                            if not info or not info.get("entries"):
+                                result = f"No encontré videos para: {query}"
+                            else:
+                                video = info["entries"][0]
+                                titulo  = video.get("title", "Video")
+                                url     = video.get("webpage_url", "")
+                                dur_seg = video.get("duration", 0) or 0
+
+                                if dur_seg > max_dur:
+                                    result = f"Video encontrado pero es muy largo ({dur_seg//60} min): {titulo}\nLink: {url}"
+                                else:
+                                    # Descargar
+                                    dl_opts = {
+                                        "format": "bestvideo[ext=mp4][height<=480]+bestaudio[ext=m4a]/best[ext=mp4][height<=480]/best[height<=480]",
+                                        "outtmpl": f"{tmp_dir}/video.%(ext)s",
+                                        "quiet": True, "no_warnings": True,
+                                        "nocheckcertificate": True,
+                                        "merge_output_format": "mp4",
+                                        "noplaylist": True,
+                                    }
+                                    with _ytdlp.YoutubeDL(dl_opts) as ydl:
+                                        ydl.download([url])
+
+                                    # Encontrar el archivo descargado
+                                    archivos = [f for f in os.listdir(tmp_dir) if f.endswith((".mp4", ".mkv", ".webm"))]
+                                    if not archivos:
+                                        result = f"Descarga fallida. Link: {url}"
+                                    else:
+                                        video_path = os.path.join(tmp_dir, archivos[0])
+                                        size = os.path.getsize(video_path)
+                                        log.info(f"[{chat_id}] Video descargado: {size//1024//1024}MB")
+
+                                        if size > MAX_BYTES:
+                                            os.unlink(video_path)
+                                            result = f"Video muy grande ({size//1024//1024}MB, límite 48MB). Link: {url}"
+                                        else:
+                                            extra_files.append((
+                                                f"{titulo[:50]}.mp4",
+                                                open(video_path, "rb").read(),
+                                                f"video|{titulo[:60]}"
+                                            ))
+                                            os.unlink(video_path)
+                                            result = f"[video listo: {titulo}]"
+                                            log.info(f"[{chat_id}] Video agregado a extra_files: {size//1024//1024}MB")
+                        except Exception as e:
+                            result = f"Error descargando video: {e}"
+                            log.error(f"buscar_video error: {e}")
+
+                    elif block.name == "enviar_voz":
                         try:
                             texto_voz = block.input.get("texto", "")[:400]
                             mp3_path = texto_a_voz(texto_voz)
@@ -1451,10 +1534,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if caption == "voice":
                     if not _pidio_voz:
                         log.info(f"[{chat_id}] Voz ignorada (usuario no la pidió)")
-                        continue  # <-- NUNCA mandar voz si no la pidió
+                        continue
                     await context.bot.send_chat_action(chat_id=chat_id, action="record_voice")
                     await context.bot.send_voice(chat_id=chat_id, voice=io.BytesIO(contenido))
                     log.info(f"[{chat_id}] Voz enviada OK: {len(contenido)} bytes")
+                elif caption.startswith("video|"):
+                    titulo_vid = caption.split("|", 1)[1]
+                    await context.bot.send_chat_action(chat_id=chat_id, action="upload_video")
+                    await context.bot.send_video(chat_id=chat_id,
+                        video=io.BytesIO(contenido), filename=nombre_f,
+                        caption=titulo_vid, supports_streaming=True)
+                    log.info(f"[{chat_id}] Video enviado: {len(contenido)//1024//1024}MB")
                 else:
                     await context.bot.send_chat_action(chat_id=chat_id, action="upload_document")
                     await context.bot.send_document(chat_id=chat_id,
@@ -1583,6 +1673,13 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await context.bot.send_chat_action(chat_id=chat_id, action="record_voice")
                     await context.bot.send_voice(chat_id=chat_id, voice=io.BytesIO(contenido))
                     log.info(f"[{chat_id}] Voz enviada OK: {len(contenido)} bytes")
+                elif caption.startswith("video|"):
+                    titulo_vid = caption.split("|", 1)[1]
+                    await context.bot.send_chat_action(chat_id=chat_id, action="upload_video")
+                    await context.bot.send_video(chat_id=chat_id,
+                        video=io.BytesIO(contenido), filename=nombre_f,
+                        caption=titulo_vid, supports_streaming=True)
+                    log.info(f"[{chat_id}] Video enviado: {len(contenido)//1024//1024}MB")
                 else:
                     await context.bot.send_chat_action(chat_id=chat_id, action="upload_document")
                     await context.bot.send_document(chat_id=chat_id,
