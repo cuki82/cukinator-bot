@@ -299,6 +299,67 @@ async def get_weather(location: str = "Buenos Aires") -> dict:
     except Exception as e:
         return {"error": str(e)}
 
+
+# ── Skill: Hora local por ciudad ───────────────────────────────────────────────
+_CITY_TZ = {
+    "buenos aires":"America/Argentina/Buenos_Aires","cordoba":"America/Argentina/Cordoba",
+    "córdoba":"America/Argentina/Cordoba","rosario":"America/Argentina/Cordoba",
+    "mendoza":"America/Argentina/Mendoza","salta":"America/Argentina/Salta",
+    "santiago":"America/Santiago","lima":"America/Lima",
+    "bogota":"America/Bogota","bogotá":"America/Bogota",
+    "mexico":"America/Mexico_City","ciudad de mexico":"America/Mexico_City",
+    "sao paulo":"America/Sao_Paulo","são paulo":"America/Sao_Paulo",
+    "rio de janeiro":"America/Sao_Paulo","montevideo":"America/Montevideo",
+    "caracas":"America/Caracas","la paz":"America/La_Paz",
+    "madrid":"Europe/Madrid","barcelona":"Europe/Madrid",
+    "london":"Europe/London","londres":"Europe/London",
+    "paris":"Europe/Paris","parís":"Europe/Paris",
+    "berlin":"Europe/Berlin","berlín":"Europe/Berlin",
+    "roma":"Europe/Rome","amsterdam":"Europe/Amsterdam",
+    "zurich":"Europe/Zurich","ginebra":"Europe/Zurich",
+    "tokyo":"Asia/Tokyo","shanghai":"Asia/Shanghai","beijing":"Asia/Shanghai",
+    "dubai":"Asia/Dubai","singapur":"Asia/Singapore",
+    "hong kong":"Asia/Hong_Kong","mumbai":"Asia/Kolkata","delhi":"Asia/Kolkata",
+    "sydney":"Australia/Sydney","melbourne":"Australia/Melbourne",
+    "new york":"America/New_York","nueva york":"America/New_York",
+    "miami":"America/New_York","chicago":"America/Chicago",
+    "los angeles":"America/Los_Angeles","san francisco":"America/Los_Angeles",
+    "toronto":"America/Toronto","vancouver":"America/Vancouver",
+}
+
+def get_time(city: str = "Buenos Aires") -> dict:
+    """Retorna la hora actual en una ciudad."""
+    import pytz as _pytz
+    from datetime import datetime as _dt
+    city_lower = city.lower().strip()
+    tz_name = _CITY_TZ.get(city_lower)
+    if not tz_name:
+        try:
+            from geopy.geocoders import Nominatim
+            from timezonefinder import TimezoneFinder
+            loc = Nominatim(user_agent="cuki_time").geocode(city, language="es", timeout=5)
+            if loc:
+                tz_name = TimezoneFinder().timezone_at(lat=loc.latitude, lng=loc.longitude)
+        except Exception:
+            pass
+    if not tz_name:
+        return {"error": f"No encontré la zona horaria para '{city}'"}
+    try:
+        tz  = _pytz.timezone(tz_name)
+        now = _dt.now(tz)
+        offset = now.utcoffset().total_seconds() / 3600
+        dias = ["lunes","martes","miércoles","jueves","viernes","sábado","domingo"]
+        return {
+            "ciudad":     city.title(),
+            "hora":       now.strftime("%H:%M"),
+            "fecha":      f"{dias[now.weekday()]} {now.strftime('%d/%m/%Y')}",
+            "timezone":   tz_name,
+            "utc_offset": f"UTC{offset:+.0f}",
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
 # ── Text-to-Speech ─────────────────────────────────────────────────────────────
 VOICE_MAX_CHARS  = 500
 ELEVENLABS_KEY   = os.environ.get("ELEVENLABS_KEY", "sk_070b39dacb714d3194f831b3de3849ffab5c0e1f73821366")
@@ -547,6 +608,16 @@ def search_web(query: str) -> str:
 
 # ── Tools de Claude ────────────────────────────────────────────────────────────
 TOOLS = [
+    {
+        "name": "get_time",
+        "description": "Devuelve la hora y fecha actual en cualquier ciudad. Usá cuando pregunten qué hora es, la hora en algún lugar, o la diferencia horaria. Default: Buenos Aires.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "city": {"type": "string", "description": "Ciudad (ej: Buenos Aires, Tokyo, London). Default: Buenos Aires"}
+            }
+        }
+    },
     {
         "name": "get_weather",
         "description": "Obtiene el clima actual de una ciudad. Usá cuando el usuario pregunte por el clima, temperatura, tiempo atmosférico de cualquier lugar.",
@@ -1122,7 +1193,18 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
             for block in response.content:
                 if block.type == "tool_use":
 
-                    if block.name == "get_weather":
+                    if block.name == "get_time":
+                        try:
+                            city = block.input.get("city", "Buenos Aires")
+                            data = get_time(city)
+                            if "error" in data:
+                                result = data["error"]
+                            else:
+                                result = f"{data['ciudad']}: {data['hora']} ({data['fecha']}) — {data['utc_offset']}"
+                        except Exception as e:
+                            result = f"Error: {e}"
+
+                    elif block.name == "get_weather":
                         try:
                             import asyncio as _asyncio
                             location = block.input.get("location", "Buenos Aires")
