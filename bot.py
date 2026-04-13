@@ -1382,8 +1382,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log.info(f"[{chat_id}] {name}: {user_msg}")
 
     # Trigger natural para el menú
-    if user_msg.strip().lower() in ("menu", "menú", "abri el menu", "abrí el menú", "ver menu", "ver menú"):
+    msg_lower = user_msg.strip().lower()
+    if msg_lower in ("menu", "menú", "abri el menu", "abrí el menú", "ver menu", "ver menú"):
         await cmd_menu(update, context)
+        return
+    if msg_lower in ("biblioteca", "librería", "libreria", "knowledge base", "kb", "kb reaseguros"):
+        await cmd_biblioteca(update, context)
         return
 
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
@@ -1669,6 +1673,195 @@ async def cmd_testvoice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         log.error(f"[{chat_id}] /testvoice error: {e}")
         await update.message.reply_text(f"Error en voz: {e}")
+
+
+
+# ── BIBLIOTECA — menú de knowledge base ───────────────────────────────────────
+def _kb_back(rows, label="Volver", back="lib:main"):
+    return rows + [[InlineKeyboardButton(f"← {label}", callback_data=back)]]
+
+async def cmd_biblioteca(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await _lib_show_main(update.message, context, is_query=False)
+
+async def _lib_show_main(target, context, is_query=False):
+    teclado = InlineKeyboardMarkup([
+        [InlineKeyboardButton("REASEGUROS",      callback_data="lib:ri:main")],
+        [InlineKeyboardButton("ASTROLOGÍA",      callback_data="lib:astro:main")],
+        [InlineKeyboardButton("TODOS LOS DOCS",  callback_data="lib:docs:all")],
+        [InlineKeyboardButton("BUSCAR",          callback_data="lib:search")],
+    ])
+    txt = "BIBLIOTECA — elegí una sección:"
+    if is_query:
+        await target.edit_message_text(txt, reply_markup=teclado)
+    else:
+        await target.reply_text(txt, reply_markup=teclado)
+
+async def handle_biblioteca_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data    = query.data
+    chat_id = query.message.chat_id
+
+    if data == "lib:main":
+        await _lib_show_main(query, context, is_query=True)
+
+    elif data == "lib:ri:main":
+        teclado = InlineKeyboardMarkup(_kb_back([
+            [InlineKeyboardButton("Conceptos clave",        callback_data="lib:ri:conceptos")],
+            [InlineKeyboardButton("Estructuras de tratado", callback_data="lib:ri:estructuras")],
+            [InlineKeyboardButton("Claims y siniestros",    callback_data="lib:ri:claims")],
+            [InlineKeyboardButton("Underwriting / pricing", callback_data="lib:ri:uw")],
+            [InlineKeyboardButton("Clausulas y wordings",   callback_data="lib:ri:wordings")],
+            [InlineKeyboardButton("Normativa",              callback_data="lib:ri:normativa")],
+            [InlineKeyboardButton("Buscar en reaseguros",   callback_data="lib:ri:search")],
+        ]))
+        await query.edit_message_text("REASEGUROS:", reply_markup=teclado)
+
+    elif data.startswith("lib:ri:") and len(data.split(":")) == 3 and data.split(":")[2] in ("conceptos","estructuras","claims","uw","wordings","normativa"):
+        dominio_map = {
+            "conceptos":   ("general",       "Conceptos clave"),
+            "estructuras": ("treaty",        "Estructuras — Quota Share, XoL, Stop Loss"),
+            "claims":      ("claims",        "Claims y siniestros"),
+            "uw":          ("underwriting",  "Underwriting y pricing"),
+            "wordings":    ("wording",       "Clausulas y wordings"),
+            "normativa":   ("normativa",     "Normativa"),
+        }
+        sub = data.split(":")[2]
+        domain, titulo = dominio_map[sub]
+        res = search_knowledge(domain, limit=12, db_path=DB_PATH)
+        conceptos = res.get("concepts", [])[:10]
+        if not conceptos:
+            await query.edit_message_text(
+                f"{titulo}\n\nAun no hay contenido indexado. Carga documentos con el bot.",
+                reply_markup=InlineKeyboardMarkup(_kb_back([]))
+            )
+            return
+        if not hasattr(context, '_lib_cache'):
+            context._lib_cache = {}
+        cache_key = f"ri_{sub}_{chat_id}"
+        context._lib_cache[cache_key] = conceptos
+        botones = []
+        for i, c in enumerate(conceptos):
+            botones.append([InlineKeyboardButton(c["term"][:45], callback_data=f"lib:ri:c:{i}:{sub}")])
+        await query.edit_message_text(f"{titulo}:",
+            reply_markup=InlineKeyboardMarkup(_kb_back(botones, back="lib:ri:main")))
+
+    elif data.startswith("lib:ri:c:"):
+        parts = data.split(":")
+        idx, sub = int(parts[3]), parts[4]
+        cache_key = f"ri_{sub}_{chat_id}"
+        cache = getattr(context, '_lib_cache', {})
+        conceptos = cache.get(cache_key, [])
+        if idx < len(conceptos):
+            c = conceptos[idx]
+            txt = f"{c['term']}\n\n{c['definition']}\n\nDOMINIO: {c.get('domain','—')} | FUENTE: {c.get('source','—')}"
+        else:
+            txt = "Concepto no encontrado."
+        await query.edit_message_text(txt[:3800],
+            reply_markup=InlineKeyboardMarkup(_kb_back([], back=f"lib:ri:{sub}")))
+
+    elif data == "lib:ri:search":
+        context.user_data["lib_search_mode"] = "ri"
+        await query.edit_message_text("Escribi lo que queres buscar en reaseguros:",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancelar", callback_data="lib:ri:main")]]))
+
+    elif data.startswith("lib:docs:"):
+        tipo = None if data == "lib:docs:all" else data.split(":")[-1]
+        docs = get_document_list(tipo, DB_PATH)
+        if not docs:
+            await query.edit_message_text("No hay documentos indexados.",
+                reply_markup=InlineKeyboardMarkup(_kb_back([])))
+            return
+        icons = {"doctrine":"📖","wording":"📋","regulation":"⚖️","operational":"⚙️"}
+        botones = []
+        for d in docs[:15]:
+            icon = icons.get(d["type"], "📄")
+            botones.append([InlineKeyboardButton(f"{icon} {d['title'][:38]}", callback_data=f"lib:doc:{d['id']}")])
+        filt_botones = [
+            [InlineKeyboardButton("📖 Doctrina",  callback_data="lib:docs:doctrine"),
+             InlineKeyboardButton("📋 Wordings",  callback_data="lib:docs:wording")],
+            [InlineKeyboardButton("⚖️ Normativa", callback_data="lib:docs:regulation"),
+             InlineKeyboardButton("⚙️ Operativo", callback_data="lib:docs:operational")],
+        ]
+        await query.edit_message_text(f"DOCUMENTOS ({len(docs)}):",
+            reply_markup=InlineKeyboardMarkup(_kb_back(filt_botones + botones)))
+
+    elif data.startswith("lib:doc:") and len(data.split(":")) == 3:
+        doc_id = int(data.split(":")[2])
+        import sqlite3 as _sq3, json as _j
+        con = _sq3.connect(DB_PATH)
+        con.row_factory = _sq3.Row
+        doc = con.execute("SELECT * FROM ri_documents WHERE id=?", (doc_id,)).fetchone()
+        summ = con.execute("SELECT * FROM ri_summaries WHERE doc_id=?", (doc_id,)).fetchone()
+        nc = con.execute("SELECT COUNT(*) FROM ri_concepts WHERE doc_id=?", (doc_id,)).fetchone()[0]
+        nq = con.execute("SELECT COUNT(*) FROM ri_qa WHERE doc_id=?", (doc_id,)).fetchone()[0]
+        con.close()
+        if not doc:
+            await query.edit_message_text("Documento no encontrado.")
+            return
+        txt = f"{doc['title']}\nTipo: {doc['source_type']} | Org: {doc['source_org'] or '—'}\nConceptos: {nc} | QA: {nq}\n\n"
+        if summ and summ['executive']:
+            txt += f"RESUMEN:\n{summ['executive']}\n\n"
+            if summ['key_points']:
+                pts = _j.loads(summ['key_points'])
+                txt += "PUNTOS CLAVE:\n" + "\n".join(f"• {p}" for p in pts[:4])
+        botones = [
+            [InlineKeyboardButton("Ver conceptos", callback_data=f"lib:doc_c:{doc_id}"),
+             InlineKeyboardButton("Ver QA",        callback_data=f"lib:doc_q:{doc_id}")],
+            [InlineKeyboardButton("Buscar en este doc", callback_data=f"lib:doc_s:{doc_id}")],
+        ]
+        await query.edit_message_text(txt[:3800],
+            reply_markup=InlineKeyboardMarkup(_kb_back(botones, back="lib:docs:all")))
+
+    elif data.startswith("lib:doc_c:"):
+        doc_id = int(data.split(":")[2])
+        import sqlite3 as _sq3
+        con = _sq3.connect(DB_PATH)
+        rows = con.execute("SELECT term, definition FROM ri_concepts WHERE doc_id=? LIMIT 12", (doc_id,)).fetchall()
+        con.close()
+        if not rows:
+            txt = "No hay conceptos indexados para este documento."
+        else:
+            txt = "CONCEPTOS:\n\n" + "\n\n".join(f"• {r[0]}: {r[1][:150]}" for r in rows)
+        await query.edit_message_text(txt[:3800],
+            reply_markup=InlineKeyboardMarkup(_kb_back([], back=f"lib:doc:{doc_id}")))
+
+    elif data.startswith("lib:doc_q:"):
+        doc_id = int(data.split(":")[2])
+        import sqlite3 as _sq3
+        con = _sq3.connect(DB_PATH)
+        rows = con.execute("SELECT question, answer FROM ri_qa WHERE doc_id=? LIMIT 8", (doc_id,)).fetchall()
+        con.close()
+        if not rows:
+            txt = "No hay QA indexado para este documento."
+        else:
+            txt = "Q&A:\n\n" + "\n\n".join(f"Q: {r[0]}\nA: {r[1][:200]}" for r in rows)
+        await query.edit_message_text(txt[:3800],
+            reply_markup=InlineKeyboardMarkup(_kb_back([], back=f"lib:doc:{doc_id}")))
+
+    elif data.startswith("lib:doc_s:"):
+        doc_id = data.split(":")[2]
+        context.user_data["lib_search_mode"] = f"doc:{doc_id}"
+        await query.edit_message_text("Escribi lo que queres buscar en este documento:",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancelar", callback_data=f"lib:doc:{doc_id}")]]))
+
+    elif data == "lib:search":
+        context.user_data["lib_search_mode"] = "all"
+        await query.edit_message_text("BUSCADOR — escribi lo que queres buscar (busca en toda la biblioteca):",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancelar", callback_data="lib:main")]]))
+
+    elif data == "lib:astro:main":
+        perfiles = astro_listar(chat_id)
+        if not perfiles:
+            await query.edit_message_text("No hay cartas astrologicas guardadas.",
+                reply_markup=InlineKeyboardMarkup(_kb_back([])))
+            return
+        botones = [[InlineKeyboardButton(
+            f"{p['nombre'].title()} — {p['fecha']}",
+            callback_data=f"astro:ver:{p['nombre']}"
+        )] for p in perfiles]
+        await query.edit_message_text("ASTROLOGIA — cartas guardadas:",
+            reply_markup=InlineKeyboardMarkup(_kb_back(botones)))
 
 async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Menú principal con todos los comandos organizados."""
@@ -1956,8 +2149,10 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("reset",     cmd_reset))
     app.add_handler(CommandHandler("cartas",    cmd_cartas))
     app.add_handler(CommandHandler("testvoice", cmd_testvoice))
-    app.add_handler(CommandHandler("voz",       cmd_voz))
-    app.add_handler(CommandHandler("menu",      cmd_menu))
+    app.add_handler(CommandHandler("voz",        cmd_voz))
+    app.add_handler(CommandHandler("menu",       cmd_menu))
+    app.add_handler(CommandHandler("biblioteca", cmd_biblioteca))
+    app.add_handler(CallbackQueryHandler(handle_biblioteca_callback, pattern="^lib:"))
     app.add_handler(CallbackQueryHandler(handle_menu_callback, pattern="^menu:"))
     app.add_handler(CallbackQueryHandler(handle_voz_callback,  pattern="^voz:"))
     app.add_handler(CallbackQueryHandler(handle_callback,      pattern="^astro:"))
