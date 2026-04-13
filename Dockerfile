@@ -23,6 +23,6 @@ RUN pip install --no-cache-dir \
 
 RUN mkdir -p /data
 
-COPY bot.py transcribe.py swiss_engine.py memory_store.py config_store.py ./
+COPY bot.py transcribe.py swiss_engine.py memory_store.py config_store.py reinsurance_kb.py ./
 
 CMD ["python", "bot.py"]
