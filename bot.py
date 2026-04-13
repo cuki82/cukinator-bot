@@ -300,7 +300,7 @@ async def get_weather(location: str = "Buenos Aires") -> dict:
         return {"error": str(e)}
 
 
-# ── Skill: Hora local por ciudad ───────────────────────────────────────────────
+# ── Skill: Hora local (WorldTimeAPI) ──────────────────────────────────────────
 _CITY_TZ = {
     "buenos aires":"America/Argentina/Buenos_Aires","cordoba":"America/Argentina/Cordoba",
     "córdoba":"America/Argentina/Cordoba","rosario":"America/Argentina/Cordoba",
@@ -309,55 +309,61 @@ _CITY_TZ = {
     "bogota":"America/Bogota","bogotá":"America/Bogota",
     "mexico":"America/Mexico_City","ciudad de mexico":"America/Mexico_City",
     "sao paulo":"America/Sao_Paulo","são paulo":"America/Sao_Paulo",
-    "rio de janeiro":"America/Sao_Paulo","montevideo":"America/Montevideo",
+    "rio":"America/Sao_Paulo","montevideo":"America/Montevideo",
     "caracas":"America/Caracas","la paz":"America/La_Paz",
     "madrid":"Europe/Madrid","barcelona":"Europe/Madrid",
     "london":"Europe/London","londres":"Europe/London",
     "paris":"Europe/Paris","parís":"Europe/Paris",
     "berlin":"Europe/Berlin","berlín":"Europe/Berlin",
-    "roma":"Europe/Rome","amsterdam":"Europe/Amsterdam",
-    "zurich":"Europe/Zurich","ginebra":"Europe/Zurich",
+    "roma":"Europe/Rome","amsterdam":"Europe/Amsterdam","zurich":"Europe/Zurich",
     "tokyo":"Asia/Tokyo","shanghai":"Asia/Shanghai","beijing":"Asia/Shanghai",
     "dubai":"Asia/Dubai","singapur":"Asia/Singapore",
     "hong kong":"Asia/Hong_Kong","mumbai":"Asia/Kolkata","delhi":"Asia/Kolkata",
     "sydney":"Australia/Sydney","melbourne":"Australia/Melbourne",
     "new york":"America/New_York","nueva york":"America/New_York",
     "miami":"America/New_York","chicago":"America/Chicago",
-    "los angeles":"America/Los_Angeles","san francisco":"America/Los_Angeles",
-    "toronto":"America/Toronto","vancouver":"America/Vancouver",
+    "los angeles":"America/Los_Angeles","toronto":"America/Toronto",
 }
 
-def get_time(city: str = "Buenos Aires") -> dict:
-    """Retorna la hora actual en una ciudad."""
-    import pytz as _pytz
-    from datetime import datetime as _dt
-    city_lower = city.lower().strip()
-    tz_name = _CITY_TZ.get(city_lower)
-    if not tz_name:
-        try:
-            from geopy.geocoders import Nominatim
-            from timezonefinder import TimezoneFinder
-            loc = Nominatim(user_agent="cuki_time").geocode(city, language="es", timeout=5)
-            if loc:
-                tz_name = TimezoneFinder().timezone_at(lat=loc.latitude, lng=loc.longitude)
-        except Exception:
-            pass
-    if not tz_name:
-        return {"error": f"No encontré la zona horaria para '{city}'"}
+DIAS_ES = ["lunes","martes","miércoles","jueves","viernes","sábado","domingo"]
+
+async def get_time(timezone: str = "America/Argentina/Buenos_Aires") -> dict:
+    """Obtiene la hora actual via WorldTimeAPI."""
+    url = f"http://worldtimeapi.org/api/timezone/{timezone}"
     try:
-        tz  = _pytz.timezone(tz_name)
-        now = _dt.now(tz)
-        offset = now.utcoffset().total_seconds() / 3600
-        dias = ["lunes","martes","miércoles","jueves","viernes","sábado","domingo"]
+        async with _httpx.AsyncClient(timeout=8) as client:
+            resp = await client.get(url)
+        if resp.status_code != 200:
+            return {"error": f"No pude obtener la hora para {timezone}"}
+        data = resp.json()
+        dow = int(data.get("day_of_week", 0))  # 0=domingo en worldtimeapi
+        dia = DIAS_ES[dow - 1] if dow > 0 else DIAS_ES[6]
         return {
-            "ciudad":     city.title(),
-            "hora":       now.strftime("%H:%M"),
-            "fecha":      f"{dias[now.weekday()]} {now.strftime('%d/%m/%Y')}",
-            "timezone":   tz_name,
-            "utc_offset": f"UTC{offset:+.0f}",
+            "hora":      data["datetime"][11:16],
+            "fecha":     f"{dia} {data['datetime'][:10]}",
+            "timezone":  data["timezone"],
+            "utc_offset": data.get("utc_offset",""),
         }
     except Exception as e:
         return {"error": str(e)}
+
+def city_to_timezone(city: str) -> str:
+    """Convierte nombre de ciudad a timezone string."""
+    tz = _CITY_TZ.get(city.lower().strip())
+    if tz:
+        return tz
+    # Fallback: geopy+timezonefinder
+    try:
+        from geopy.geocoders import Nominatim
+        from timezonefinder import TimezoneFinder
+        loc = Nominatim(user_agent="cuki_time").geocode(city, language="es", timeout=5)
+        if loc:
+            return TimezoneFinder().timezone_at(lat=loc.latitude, lng=loc.longitude)
+    except Exception:
+        pass
+    return None
+
+
 
 
 # ── Text-to-Speech ─────────────────────────────────────────────────────────────
@@ -610,11 +616,14 @@ def search_web(query: str) -> str:
 TOOLS = [
     {
         "name": "get_time",
-        "description": "Devuelve la hora y fecha actual en cualquier ciudad. Usá cuando pregunten qué hora es, la hora en algún lugar, o la diferencia horaria. Default: Buenos Aires.",
+        "description": "Obtiene la hora actual de cualquier ciudad o timezone via WorldTimeAPI. Usá cuando pregunten qué hora es, la hora en algún lugar, o la diferencia horaria. Default: Buenos Aires.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "city": {"type": "string", "description": "Ciudad (ej: Buenos Aires, Tokyo, London). Default: Buenos Aires"}
+                "timezone": {
+                    "type": "string",
+                    "description": "Timezone IANA (ej: America/Argentina/Buenos_Aires, Europe/London) o nombre de ciudad (ej: Tokyo, Madrid). Default: America/Argentina/Buenos_Aires"
+                }
             }
         }
     },
@@ -1195,12 +1204,19 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
 
                     if block.name == "get_time":
                         try:
-                            city = block.input.get("city", "Buenos Aires")
-                            data = get_time(city)
+                            import asyncio as _asyncio
+                            raw = block.input.get("timezone", "America/Argentina/Buenos_Aires")
+                            # Si parece nombre de ciudad (no tiene "/"), convertir a timezone
+                            if "/" not in raw:
+                                tz = city_to_timezone(raw) or "America/Argentina/Buenos_Aires"
+                            else:
+                                tz = raw
+                            data = _asyncio.run(get_time(tz))
                             if "error" in data:
                                 result = data["error"]
                             else:
-                                result = f"{data['ciudad']}: {data['hora']} ({data['fecha']}) — {data['utc_offset']}"
+                                result = f"{data['timezone']}: {data['hora']} ({data['fecha']}) {data['utc_offset']}"
+                                log.info(f"[{chat_id}] Hora: {result}")
                         except Exception as e:
                             result = f"Error: {e}"
 
