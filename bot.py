@@ -1272,8 +1272,22 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_message_full(chat_id, "user",      texto, db_path=DB_PATH)
         save_message_full(chat_id, "assistant", reply, db_path=DB_PATH)
 
-        # Enviar texto (solo si Claude no usó el tool enviar_voz)
-        if reply and reply.strip() != "[voz enviada]":
+        # El usuario mandó audio → siempre intentar responder con voz
+        tiene_voz = any(cap == "voice" for _, _, cap in extra_files)
+
+        if not tiene_voz and reply and not es_respuesta_larga(reply):
+            # Claude no llamó el tool o falló — generar voz del reply directamente
+            log.info(f"[{chat_id}] Generando voz del reply directamente")
+            ogg_path = texto_a_voz(reply)
+            if ogg_path:
+                with open(ogg_path, "rb") as f:
+                    contenido_voz = f.read()
+                os.unlink(ogg_path)
+                extra_files.append(("respuesta.ogg", contenido_voz, "voice"))
+                tiene_voz = True
+
+        # Enviar texto solo si no hay voz (o si la respuesta es larga)
+        if not tiene_voz:
             await send_long_message(context.bot, chat_id, reply, reply_to=update.message)
 
         if pdf_path:
@@ -1286,6 +1300,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if caption == "voice":
                 await context.bot.send_chat_action(chat_id=chat_id, action="record_voice")
                 await context.bot.send_voice(chat_id=chat_id, voice=io.BytesIO(contenido))
+                log.info(f"[{chat_id}] Voz enviada: {len(contenido)} bytes")
             else:
                 await context.bot.send_chat_action(chat_id=chat_id, action="upload_document")
                 await context.bot.send_document(chat_id=chat_id,
