@@ -11,3 +11,4 @@ timezonefinder==8.2.2
 gTTS==2.5.4
 
 yt-dlp==2026.3.17
+httpx==0.27.2

@@ -271,6 +271,34 @@ def clear_history(chat_id):
 # ── Google (Gmail + Calendar via Apps Script relay) ───────────────────────────
 import urllib3 as _urllib3
 
+# ── Skill: Clima (OpenWeatherMap) ──────────────────────────────────────────────
+import httpx as _httpx
+
+async def get_weather(location: str = "Buenos Aires") -> dict:
+    """Obtiene clima actual de una ubicación via OpenWeatherMap."""
+    api_key = os.environ.get("WEATHER_API_KEY", "6fc4ecceb823f299b4115a9f414c9fc7")
+    if not api_key:
+        return {"error": "WEATHER_API_KEY no configurada"}
+    url = (f"https://api.openweathermap.org/data/2.5/weather"
+           f"?q={location}&appid={api_key}&units=metric&lang=es")
+    try:
+        async with _httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(url)
+            data = resp.json()
+        if resp.status_code != 200:
+            return {"error": f"No encontré clima para '{location}': {data.get('message','')}"}
+        return {
+            "ubicacion":    data["name"],
+            "pais":         data.get("sys",{}).get("country",""),
+            "temperatura":  round(data["main"]["temp"]),
+            "sensacion":    round(data["main"]["feels_like"]),
+            "humedad":      data["main"]["humidity"],
+            "condicion":    data["weather"][0]["description"],
+            "viento_kmh":   round(data["wind"]["speed"] * 3.6),
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
 # ── Text-to-Speech ─────────────────────────────────────────────────────────────
 VOICE_MAX_CHARS  = 500
 ELEVENLABS_KEY   = os.environ.get("ELEVENLABS_KEY", "sk_070b39dacb714d3194f831b3de3849ffab5c0e1f73821366")
@@ -519,6 +547,16 @@ def search_web(query: str) -> str:
 
 # ── Tools de Claude ────────────────────────────────────────────────────────────
 TOOLS = [
+    {
+        "name": "get_weather",
+        "description": "Obtiene el clima actual de una ciudad. Usá cuando el usuario pregunte por el clima, temperatura, tiempo atmosférico de cualquier lugar.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "location": {"type": "string", "description": "Ciudad y país (ej: Buenos Aires, London, Tokyo). Default: Buenos Aires"}
+            }
+        }
+    },
     {
         "name": "buscar_video",
         "description": (
@@ -1084,7 +1122,25 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
             for block in response.content:
                 if block.type == "tool_use":
 
-                    if block.name == "buscar_video":
+                    if block.name == "get_weather":
+                        try:
+                            import asyncio as _asyncio
+                            location = block.input.get("location", "Buenos Aires")
+                            data = _asyncio.run(get_weather(location))
+                            if "error" in data:
+                                result = f"Error clima: {data['error']}"
+                            else:
+                                result = (
+                                    f"{data['ubicacion']}, {data['pais']}: "
+                                    f"{data['temperatura']}°C (sensación {data['sensacion']}°C), "
+                                    f"{data['condicion']}, humedad {data['humedad']}%, "
+                                    f"viento {data['viento_kmh']} km/h"
+                                )
+                            log.info(f"[{chat_id}] Clima: {result}")
+                        except Exception as e:
+                            result = f"Error obteniendo clima: {e}"
+
+                    elif block.name == "buscar_video":
                         try:
                             query   = block.input["query"]
                             max_dur = block.input.get("max_duration", 900)
