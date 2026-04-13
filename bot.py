@@ -267,20 +267,30 @@ import urllib3 as _urllib3
 VOICE_MAX_CHARS = 500  # respuestas más largas van como texto
 
 def texto_a_voz(texto: str, lang: str = "es") -> str | None:
-    """Convierte texto a MP3 usando gTTS. Retorna path al archivo o None si falla."""
+    """Convierte texto a OGG/OPUS usando gTTS + ffmpeg. Retorna path al archivo o None si falla."""
     try:
         from gtts import gTTS
-        import tempfile
-        # Limpiar texto para TTS (quitar símbolos técnicos)
-        import re
-        clean = re.sub(r'[*_`#\|─╔╚╗╝═]', '', texto)
+        import tempfile, subprocess, re
+        # Limpiar texto para TTS
+        clean = re.sub(r'[*_`#\|─╔╚╗╝═☌☍□△⚹]', '', texto)
         clean = re.sub(r'\s+', ' ', clean).strip()
         if not clean:
             return None
+        # Generar MP3
         tts = gTTS(clean[:VOICE_MAX_CHARS], lang=lang, slow=False)
-        tmp = tempfile.mktemp(suffix=".mp3")
-        tts.save(tmp)
-        return tmp
+        mp3 = tempfile.mktemp(suffix=".mp3")
+        ogg = tempfile.mktemp(suffix=".ogg")
+        tts.save(mp3)
+        # Convertir a OGG/OPUS (formato que Telegram espera para send_voice)
+        result = subprocess.run(
+            ["ffmpeg", "-y", "-i", mp3, "-c:a", "libopus", "-b:a", "64k", ogg],
+            capture_output=True
+        )
+        os.unlink(mp3)
+        if result.returncode != 0:
+            log.warning(f"ffmpeg error: {result.stderr.decode()[:200]}")
+            return None
+        return ogg
     except Exception as e:
         log.warning(f"TTS error: {e}")
         return None
@@ -807,7 +817,7 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None) -> tuple:
                                 with open(mp3_path, "rb") as f:
                                     contenido = f.read()
                                 os.unlink(mp3_path)
-                                extra_files.append(("respuesta.mp3", contenido, "voice"))
+                                extra_files.append(("respuesta.ogg", contenido, "voice"))
                                 result = "[voz enviada]"
                             else:
                                 result = texto_voz  # fallback a texto
