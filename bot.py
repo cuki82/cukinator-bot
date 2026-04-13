@@ -24,6 +24,8 @@ from reinsurance_kb import (init_reinsurance_kb, search_knowledge, get_document_
     get_kb_stats, create_document, add_chunk, add_concept, add_summary, add_qa,
     chunk_text, build_enrichment_prompt, build_summary_prompt, is_reinsurance_context,
     detect_domain)
+from agent_ops import (init_agent_ops, log_change, get_changelog, get_agent_status,
+    store_secret, list_secrets, register_skill, list_skills, classify_intent)
 
 # ── Configuración ──────────────────────────────────────────────────────────────
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
@@ -196,6 +198,7 @@ def init_db():
     seed_initial_configs(db_path=DB_PATH)
     init_memory_store(DB_PATH)
     init_reinsurance_kb(DB_PATH)
+    init_agent_ops(DB_PATH)
 
 def astro_guardar(chat_id: int, nombre: str, fecha: str, hora: str, lugar: str, carta: dict) -> str:
     import json
@@ -840,15 +843,112 @@ TOOLS = [
             },
             "required": ["titulo", "contenido", "tipo_fuente"]
         }
+    },
+    {
+        "name": "agent_estado",
+        "description": "Devuelve el estado actual del agente: configuraciones, skills, secrets, changelog, conteos de DB. Usá cuando pregunten qué tiene el sistema, qué está configurado, o para diagnóstico.",
+        "input_schema": {"type": "object", "properties": {}}
+    },
+    {
+        "name": "agent_changelog",
+        "description": "Muestra el historial de cambios aplicados al agente. Usá cuando pregunten qué se cambió, qué se hizo, historial de operaciones.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "description": "Cantidad de entradas (default 10)"}
+            }
+        }
+    },
+    {
+        "name": "agent_guardar_secret",
+        "description": "Guarda una API key, token o credencial de forma segura. Solo guarda hash+mask en DB, el valor en memoria del proceso. Usá cuando el usuario pegue una credencial.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "key_name":    {"type": "string", "description": "Nombre de la variable (ej: OPENAI_KEY, TWILIO_TOKEN)"},
+                "value":       {"type": "string", "description": "Valor de la credencial"},
+                "service":     {"type": "string", "description": "Servicio al que pertenece"},
+                "description": {"type": "string", "description": "Para qué sirve"}
+            },
+            "required": ["key_name", "value"]
+        }
+    },
+    {
+        "name": "agent_registrar_skill",
+        "description": "Registra un nuevo skill/capacidad en el sistema. Usá cuando el usuario pida agregar una nueva habilidad, función o módulo.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name":        {"type": "string", "description": "Nombre interno del skill"},
+                "description": {"type": "string", "description": "Qué hace este skill"},
+                "triggers":    {"type": "array",  "items": {"type": "string"}, "description": "Frases que lo activan"},
+                "config":      {"type": "object",  "description": "Configuración adicional (opcional)"}
+            },
+            "required": ["name", "description"]
+        }
+    },
+    {
+        "name": "agent_log",
+        "description": "Registra una acción operativa en el changelog del agente. Usá siempre que ejecutes un cambio significativo en el sistema.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "instruction": {"type": "string", "description": "Instrucción original del usuario"},
+                "action":      {"type": "string", "description": "Qué se ejecutó"},
+                "result":      {"type": "string", "description": "Resultado"},
+                "status":      {"type": "string", "description": "done | pending | requires_deploy | requires_credential"},
+                "requires":    {"type": "string", "description": "Qué falta si status no es done"}
+            },
+            "required": ["instruction", "action", "result"]
+        }
     }
 ]
 
 SYSTEM_PROMPT = """IDENTIDAD — REGLA ABSOLUTA:
 Tu nombre es Cukinator (se pronuncia "Cuki" en audio). NUNCA digas que te llamás Claude, Claudio, ni ningún otro nombre. Si te preguntan cómo te llamás, respondé siempre "Cukinator" (en texto) o "Cuki" (en audio). No sos Claude. Sos Cukinator.
 
+MODO REMOTE CONTROL — COMPORTAMIENTO OPERATIVO CENTRAL:
+Este agente funciona como panel de control remoto del sistema. Telegram es la terminal de administración.
+Ante cada mensaje, evaluá internamente:
+- ¿Es consulta conversacional o instrucción operativa?
+- ¿Qué sistema toca? ¿Requiere credencial? ¿Requiere persistencia? ¿Requiere deploy?
+- ¿Puedo ejecutarlo ya con las tools disponibles?
+
+PROTOCOLO ANTE INSTRUCCIÓN OPERATIVA:
+1. INTERPRETAR: detectar intención, sistema afectado, parámetros, credenciales, riesgos
+2. PLAN: qué componentes tocar, qué falta
+3. EJECUTAR: usar las tools disponibles SIN preguntar si la intención es clara
+4. REPORTAR: qué entendí → qué hice → qué cambió → cómo se usa → qué falta
+
+REGLA DE ORO: Si algo puede ejecutarse con las tools disponibles, EJECUTALO. No expliques cómo hacerlo. Hacelo.
+Solo pedí confirmación si: vas a sobreescribir algo crítico, hay ambigüedad seria, o falta una credencial.
+
+CAPACIDADES OPERATIVAS DISPONIBLES:
+- config_guardar / config_leer / config_listar → persiste configuración en Railway DB
+- agent_guardar_secret → guarda API keys y credenciales de forma segura
+- agent_registrar_skill → registra nuevas capacidades del sistema
+- agent_estado → estado completo del sistema
+- agent_changelog → historial de cambios
+- agent_log → registra cada acción operativa (usarlo siempre tras cambios importantes)
+- memory_guardar_hecho → persiste información importante
+- ri_ingestar → indexa documentos en knowledge base
+
+PARA CAMBIOS DE CÓDIGO (bot.py, módulos):
+- Estos cambios requieren push a GitHub → deploy en Railway
+- Explicá el cambio exacto que se va a hacer, creá el código, y decile al usuario que lo aplicarás vos en la próxima sesión de desarrollo
+- O pedile que lo apruebe para aplicarlo vía Claude Code
+
+ANTE CREDENCIALES PEGADAS EN TELEGRAM:
+- Detectarlas automáticamente
+- Clasificar tipo (API key, token, OAuth, JSON, bearer)
+- Usar agent_guardar_secret INMEDIATAMENTE
+- Mostrar solo el valor enmascarado (sk-...xxxx)
+- Confirmar a qué servicio queda asociada
+
 ARQUITECTURA DE ROLES:
 Sos un agente multi-dominio con memoria persistente. Tus roles activos:
 - Asistente conversacional general
+- Operador técnico remoto del stack (MODO PRINCIPAL ante instrucciones operativas)
 - Asistente técnico (IA, bots, APIs, devops)
 - Astrólogo
 - Asistente estratégico
@@ -1404,6 +1504,101 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
                         except Exception as e:
                             result = f"Error ingiriendo documento: {e}"
                             log.error(f"RI ingest error: {e}")
+
+                    elif block.name == "agent_estado":
+                        try:
+                            st = get_agent_status(DB_PATH)
+                            skills = list_skills(DB_PATH)
+                            secrets_list = list_secrets(DB_PATH)
+                            lines = [
+                                f"DB: {st['db_path']} ({st['db_size_kb']} KB)",
+                                f"Mensajes: {st['counts'].get('mensajes')} | Configs: {st['counts'].get('configs')} | Skills: {st['counts'].get('skills')} | Secrets: {st['counts'].get('secrets')}",
+                                f"Docs KB: {st['counts'].get('documentos')} | Conceptos: {st['counts'].get('conceptos')}",
+                                f"Perfiles astro: {st['counts'].get('perfiles_astro')}",
+                            ]
+                            if skills:
+                                lines.append(f"Skills registrados: {', '.join(s['name'] for s in skills)}")
+                            if secrets_list:
+                                lines.append(f"Secrets: {', '.join(s['key'] for s in secrets_list)}")
+                            if st["last_changes"]:
+                                lines.append("Últimos cambios:")
+                                for c in st["last_changes"][:3]:
+                                    lines.append(f"  [{c['ts']}] {c['action'][:60]} → {c['status']}")
+                            result = "\n".join(lines)
+                        except Exception as e:
+                            result = f"Error obteniendo estado: {e}"
+
+                    elif block.name == "agent_changelog":
+                        try:
+                            limit = block.input.get("limit", 10)
+                            changes = get_changelog(limit, DB_PATH)
+                            if not changes:
+                                result = "Sin cambios registrados aún."
+                            else:
+                                lines = [f"CHANGELOG ({len(changes)} entradas):"]
+                                for c in changes:
+                                    lines.append(f"[{c['ts']}] {c['action'][:70]}")
+                                    if c['result']:
+                                        lines.append(f"  → {c['result'][:60]}")
+                                    if c['requires']:
+                                        lines.append(f"  ⚠ requiere: {c['requires']}")
+                                result = "\n".join(lines)
+                        except Exception as e:
+                            result = f"Error: {e}"
+
+                    elif block.name == "agent_guardar_secret":
+                        try:
+                            key_name = block.input["key_name"].upper()
+                            value    = block.input["value"]
+                            service  = block.input.get("service", "")
+                            desc     = block.input.get("description", "")
+                            masked   = store_secret(key_name, value, service, desc, DB_PATH)
+                            log_change(
+                                instruction=f"Guardar secret {key_name}",
+                                action=f"Secret '{key_name}' guardado para {service or 'servicio desconocido'}",
+                                result=f"Valor: {masked}",
+                                status="done",
+                                chat_id=chat_id,
+                                db_path=DB_PATH
+                            )
+                            result = f"Secret '{key_name}' guardado. Valor: {masked}. Servicio: {service or '—'}."
+                            log.info(f"[{chat_id}] Secret guardado: {key_name} ({masked})")
+                        except Exception as e:
+                            result = f"Error guardando secret: {e}"
+
+                    elif block.name == "agent_registrar_skill":
+                        try:
+                            name    = block.input["name"]
+                            desc    = block.input["description"]
+                            triggers = block.input.get("triggers", [])
+                            config  = block.input.get("config", {})
+                            register_skill(name, desc, triggers, config=config, db_path=DB_PATH)
+                            log_change(
+                                instruction=f"Registrar skill {name}",
+                                action=f"Skill '{name}' registrado",
+                                result=f"Triggers: {triggers}",
+                                status="done",
+                                chat_id=chat_id,
+                                db_path=DB_PATH
+                            )
+                            result = f"Skill '{name}' registrado. Descripción: {desc}. Triggers: {triggers}."
+                        except Exception as e:
+                            result = f"Error registrando skill: {e}"
+
+                    elif block.name == "agent_log":
+                        try:
+                            log_change(
+                                instruction=block.input["instruction"],
+                                action=block.input["action"],
+                                result=block.input["result"],
+                                status=block.input.get("status", "done"),
+                                requires=block.input.get("requires"),
+                                chat_id=chat_id,
+                                db_path=DB_PATH
+                            )
+                            result = "Cambio registrado en changelog."
+                        except Exception as e:
+                            result = f"Error: {e}"
 
                     else:
                         result = "Herramienta no reconocida."
