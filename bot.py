@@ -264,42 +264,68 @@ def clear_history(chat_id):
 import urllib3 as _urllib3
 
 # ── Text-to-Speech ─────────────────────────────────────────────────────────────
-VOICE_MAX_CHARS = 500  # respuestas más largas van como texto
+VOICE_MAX_CHARS  = 500
+ELEVENLABS_KEY   = os.environ.get("ELEVENLABS_KEY", "sk_070b39dacb714d3194f831b3de3849ffab5c0e1f73821366")
+ELEVENLABS_VOICE = os.environ.get("ELEVENLABS_VOICE", "SHcpmnTftylBb6nJGEXY")  # COCOBASILE
 
 def texto_a_voz(texto: str, lang: str = "es") -> str | None:
-    """Convierte texto a OGG/OPUS usando espeak-ng (offline) + ffmpeg."""
+    """Convierte texto a OGG/OPUS. Usa ElevenLabs (COCOBASILE) con fallback a espeak-ng."""
+    import tempfile, subprocess, re
+    clean = re.sub(r'[*_`#\|─╔╚╗╝═☌☍□△⚹]', '', texto)
+    clean = re.sub(r'\s+', ' ', clean).strip()
+    if not clean:
+        return None
+    log.info(f"TTS: '{clean[:60]}'")
+
+    # Intentar ElevenLabs primero
     try:
-        import tempfile, subprocess, re
-        clean = re.sub(r'[*_`#\|─╔╚╗╝═☌☍□△⚹]', '', texto)
-        clean = re.sub(r'\s+', ' ', clean).strip()
-        if not clean:
-            log.warning("TTS: texto vacío")
-            return None
-        log.info(f"TTS: generando voz para: {clean[:60]}")
+        import requests as _req
+        r = _req.post(
+            f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE}",
+            headers={"xi-api-key": ELEVENLABS_KEY, "Content-Type": "application/json"},
+            json={
+                "text": clean[:VOICE_MAX_CHARS],
+                "model_id": "eleven_multilingual_v2",
+                "voice_settings": {"stability": 0.5, "similarity_boost": 0.85}
+            },
+            timeout=15
+        )
+        if r.status_code == 200 and len(r.content) > 1000:
+            mp3 = tempfile.mktemp(suffix=".mp3")
+            ogg = tempfile.mktemp(suffix=".ogg")
+            open(mp3, "wb").write(r.content)
+            res = subprocess.run(
+                ["ffmpeg", "-y", "-i", mp3, "-c:a", "libopus", "-b:a", "64k", ogg],
+                capture_output=True
+            )
+            os.unlink(mp3)
+            if res.returncode == 0:
+                log.info(f"TTS ElevenLabs OK: {os.path.getsize(ogg)} bytes")
+                return ogg
+        log.warning(f"TTS ElevenLabs falló: {r.status_code}")
+    except Exception as e:
+        log.warning(f"TTS ElevenLabs error: {e}")
+
+    # Fallback: espeak-ng (offline)
+    try:
         wav = tempfile.mktemp(suffix=".wav")
         ogg = tempfile.mktemp(suffix=".ogg")
-        # espeak-ng: -v es (español), -s 145 (velocidad), -w (output wav)
         r1 = subprocess.run(
             ["espeak-ng", "-v", "es", "-s", "145", "-w", wav, clean[:VOICE_MAX_CHARS]],
             capture_output=True
         )
-        if r1.returncode != 0:
-            log.error(f"TTS espeak-ng error: {r1.stderr.decode()[:200]}")
-            return None
-        log.info(f"TTS: WAV generado {os.path.getsize(wav)} bytes")
         r2 = subprocess.run(
             ["ffmpeg", "-y", "-i", wav, "-c:a", "libopus", "-b:a", "64k", ogg],
             capture_output=True
         )
         os.unlink(wav)
-        if r2.returncode != 0:
-            log.error(f"TTS ffmpeg error: {r2.stderr.decode()[:200]}")
-            return None
-        log.info(f"TTS: OGG generado {os.path.getsize(ogg)} bytes")
-        return ogg
+        if r1.returncode == 0 and r2.returncode == 0:
+            log.info(f"TTS espeak-ng fallback OK: {os.path.getsize(ogg)} bytes")
+            return ogg
     except Exception as e:
-        log.error(f"TTS error: {e}")
-        return None
+        log.error(f"TTS espeak-ng error: {e}")
+
+    return None
 
 def es_respuesta_larga(texto: str) -> bool:
     """Detecta si la respuesta es técnica/larga y no debería ir como voz."""
