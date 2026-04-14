@@ -1,34 +1,29 @@
-# Dockerfile for Cukinator Bot
-FROM python:3.11-slim
+FROM python:3.11
+
+RUN apt-get update && apt-get install -y \
+    ffmpeg gcc g++ \
+    fonts-dejavu-mono \
+    espeak-ng \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# System dependencies for audio processing and compilation
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ffmpeg \
-    gcc \
-    g++ \
-    libffi-dev \
-    && rm -rf /var/lib/apt/lists/*
+RUN pip install --no-cache-dir --upgrade pip
+RUN pip install --no-cache-dir numpy==1.26.4
+RUN pip install --no-cache-dir pyswisseph==2.10.3.2
+RUN pip install --no-cache-dir openai-whisper==20250625
+RUN pip install --no-cache-dir ddgs==9.13.0
+RUN pip install --no-cache-dir "python-telegram-bot[job-queue]==22.7"
+RUN pip install --no-cache-dir anthropic==0.94.0
+RUN pip install --no-cache-dir fpdf2==2.8.7 geopy==2.4.1 timezonefinder==8.2.2
+RUN pip install --no-cache-dir requests==2.32.5 pytz==2026.1.post1 httpx==0.27.2
+RUN pip install --no-cache-dir gTTS==2.5.4 yt-dlp==2026.3.17 paramiko==3.5.0
 
-# Upgrade pip and install build tools
-RUN pip install --no-cache-dir --upgrade pip setuptools wheel
+RUN mkdir -p /data
 
-# Python dependencies (usando faster-whisper en lugar de openai-whisper)
-RUN pip install --no-cache-dir \
-    python-telegram-bot==22.0 \
-    anthropic==0.42.0 \
-    httpx>=0.27.0 \
-    faster-whisper==1.0.3 \
-    pyswisseph==2.10.3.2 \
-    requests==2.32.3 \
-    duckduckgo-search==7.3.2 \
-    elevenlabs==1.4.0 \
-    fpdf2==2.8.1 \
-    paramiko==3.4.0
+COPY bot.py bot_core.py transcribe.py ./
+COPY swiss_engine.py memory_store.py config_store.py reinsurance_kb.py agent_ops.py ./
+COPY handlers/ ./handlers/
+COPY modules/ ./modules/
 
-# Copy application code
-COPY . .
-
-# Run the bot
 CMD ["python", "bot.py"]
