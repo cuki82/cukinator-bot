@@ -31,22 +31,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_msg = update.message.text
     name     = update.effective_user.first_name or "Usuario"
 
-    # ── Agrupar chunks de mensajes largos pegados desde Telegram ──────────────
-    if not hasattr(context, '_msg_buffer'):
-        context._msg_buffer = {}
-
-    buf_key = f"buf_{chat_id}"
-    context._msg_buffer.setdefault(buf_key, []).append(user_msg)
-
-    await asyncio.sleep(1.5)
-
-    current = context._msg_buffer.get(buf_key, [])
-    if not current or current[-1] != user_msg:
-        return  # llegó otro chunk después, ese se encarga
-
-    chunks = context._msg_buffer.pop(buf_key, [user_msg])
-    user_msg = "\n".join(chunks)
-    # ──────────────────────────────────────────────────────────────────────────
+    # (sin buffer)
 
     log.info(f"[{chat_id}] {name}: {user_msg[:80]}{'...' if len(user_msg)>80 else ''}")
 
