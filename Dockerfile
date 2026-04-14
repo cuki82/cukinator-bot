@@ -1,14 +1,15 @@
 FROM python:3.11-slim
 
-WORKDIR /app
-
-# System dependencies for whisper, pyswisseph, etc
-RUN apt-get update && apt-get install -y \
+# System dependencies for whisper, audio processing, swisseph
+RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     gcc \
     g++ \
     libffi-dev \
     && rm -rf /var/lib/apt/lists/*
+
+# Upgrade pip and install setuptools first (needed for whisper build)
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
 # Python dependencies
 RUN pip install --no-cache-dir \
@@ -23,21 +24,7 @@ RUN pip install --no-cache-dir \
     fpdf2==2.8.1 \
     paramiko==3.4.0
 
-# Copy application code
-COPY bot.py .
-COPY bot_core.py .
-COPY swiss_engine.py .
-COPY memory_store.py .
-COPY config_store.py .
-COPY agent_ops.py .
-COPY reinsurance_kb.py .
-COPY transcribe.py .
-COPY handlers/ ./handlers/
-COPY modules/ ./modules/
-
-# Create data directory for SQLite
-RUN mkdir -p /data
-
-ENV DB_PATH=/data/memory.db
+WORKDIR /app
+COPY . .
 
 CMD ["python", "bot.py"]
