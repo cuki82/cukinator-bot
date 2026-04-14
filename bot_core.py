@@ -1367,7 +1367,7 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
     while True:
         response = claude.messages.create(
             model="claude-opus-4-5",
-            max_tokens=2048,
+            max_tokens=4096,
             system=get_system_prompt(user_name=user_name, chat_id=chat_id),
             tools=tools_activos,
             messages=messages
@@ -2137,7 +2137,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         t.start()
 
         elapsed = 0
-        while t.is_alive() and elapsed < 90:
+        while t.is_alive() and elapsed < 180:
             await asyncio.sleep(4)
             elapsed += 4
             if t.is_alive():
@@ -2275,7 +2275,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Esperar con typing cada 4s
         elapsed = 0
-        while t.is_alive() and elapsed < 120:
+        while t.is_alive() and elapsed < 180:
             await asyncio.sleep(4)
             elapsed += 4
             if t.is_alive():
@@ -2899,7 +2899,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         t.start()
         import asyncio
         elapsed = 0
-        while t.is_alive() and elapsed < 90:
+        while t.is_alive() and elapsed < 180:
             await asyncio.sleep(4)
             elapsed += 4
         if t.is_alive():
