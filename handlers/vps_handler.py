@@ -1,100 +1,149 @@
 """
-handlers/vps_handler.py — Comandos VPS via SSH
+VPS Handler - Conexión SSH al VPS de Hostinger
+Permite ejecutar comandos remotos desde Telegram
 """
-import logging
-from telegram import Update
-from telegram.ext import ContextTypes
 
-from modules.ssh_executor import execute_ssh_command
+import paramiko
+import os
+import io
+from typing import Optional, Tuple
 
-log = logging.getLogger(__name__)
-
-# Comandos permitidos (whitelist por seguridad)
-ALLOWED_COMMANDS = {
-    "status": "uptime && df -h / && free -h | head -2",
-    "uptime": "uptime",
-    "disk": "df -h",
-    "memory": "free -h",
-    "processes": "ps aux --sort=-%cpu | head -15",
-    "docker": "docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'",
-    "logs": "journalctl -n 50 --no-pager",
-    "network": "ss -tuln | head -20",
-    "load": "cat /proc/loadavg && nproc",
-}
-
-
-async def vps_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /vps <comando> - Ejecuta comandos en el VPS
+class VPSHandler:
+    def __init__(self):
+        self.host = os.environ.get("VPS_HOST")
+        self.username = os.environ.get("VPS_USER", "root")
+        self.port = int(os.environ.get("VPS_PORT", 22))
+        self._ssh_key = os.environ.get("VPS_SSH_KEY") or os.environ.get("SSH_PRIVATE_KEY")
+        self._client = None
     
-    Comandos predefinidos: status, uptime, disk, memory, processes, docker, logs, network, load
-    Comando custom: /vps run <comando>
-    """
-    user_id = update.effective_user.id
-    
-    # Solo owner puede usar VPS
-    OWNER_ID = 8626420783
-    if user_id != OWNER_ID:
-        await update.message.reply_text("No tenés permiso para usar comandos VPS.")
-        return
-    
-    if not context.args:
-        help_text = """*Comandos VPS disponibles:*
-
-`/vps status` — Estado general
-`/vps uptime` — Uptime del servidor
-`/vps disk` — Uso de disco
-`/vps memory` — Uso de memoria
-`/vps processes` — Top procesos por CPU
-`/vps docker` — Containers Docker
-`/vps logs` — Últimos logs del sistema
-`/vps network` — Puertos abiertos
-`/vps load` — Load average
-
-`/vps run <comando>` — Comando custom"""
-        await update.message.reply_text(help_text, parse_mode="Markdown")
-        return
-    
-    cmd_name = context.args[0].lower()
-    
-    # Comando custom
-    if cmd_name == "run" and len(context.args) > 1:
-        custom_cmd = " ".join(context.args[1:])
-        log.info(f"VPS custom command from {user_id}: {custom_cmd}")
-        await execute_and_reply(update, custom_cmd)
-        return
-    
-    # Comando predefinido
-    if cmd_name in ALLOWED_COMMANDS:
-        command = ALLOWED_COMMANDS[cmd_name]
-        log.info(f"VPS command from {user_id}: {cmd_name}")
-        await execute_and_reply(update, command)
-        return
-    
-    await update.message.reply_text(f"Comando no reconocido: `{cmd_name}`\nUsá `/vps` para ver opciones.", parse_mode="Markdown")
-
-
-async def execute_and_reply(update: Update, command: str):
-    """Ejecuta comando SSH y envía resultado"""
-    msg = await update.message.reply_text("Ejecutando...")
-    
-    try:
-        result = execute_ssh_command(command, timeout=30)
+    def _get_client(self) -> paramiko.SSHClient:
+        """Crea o reutiliza conexión SSH"""
+        if self._client is not None:
+            try:
+                self._client.exec_command("echo ok", timeout=5)
+                return self._client
+            except:
+                self._client = None
         
-        if result["success"]:
-            output = result["stdout"].strip() or "(sin output)"
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        
+        if self._ssh_key:
+            # Conectar con key privada
+            key_file = io.StringIO(self._ssh_key)
+            try:
+                pkey = paramiko.RSAKey.from_private_key(key_file)
+            except:
+                key_file.seek(0)
+                pkey = paramiko.Ed25519Key.from_private_key(key_file)
+            
+            client.connect(
+                hostname=self.host,
+                port=self.port,
+                username=self.username,
+                pkey=pkey,
+                timeout=30
+            )
         else:
-            if result["error"]:
-                output = f"Error: {result['error']}"
-            else:
-                output = f"Exit code {result['exit_code']}:\n{result['stderr']}"
+            # Conectar con password (fallback)
+            password = os.environ.get("VPS_PASSWORD")
+            client.connect(
+                hostname=self.host,
+                port=self.port,
+                username=self.username,
+                password=password,
+                timeout=30
+            )
         
-        # Truncar si es muy largo
-        if len(output) > 4000:
-            output = output[:4000] + "\n... (truncado)"
+        self._client = client
+        return client
+    
+    def execute(self, command: str, timeout: int = 60) -> Tuple[str, str, int]:
+        """
+        Ejecuta un comando en el VPS
+        Returns: (stdout, stderr, exit_code)
+        """
+        client = self._get_client()
+        stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
         
-        await msg.edit_text(f"```\n{output}\n```", parse_mode="Markdown")
+        exit_code = stdout.channel.recv_exit_status()
+        out = stdout.read().decode('utf-8', errors='replace')
+        err = stderr.read().decode('utf-8', errors='replace')
         
-    except Exception as e:
-        log.error(f"VPS error: {e}")
-        await msg.edit_text(f"Error ejecutando comando: {e}")
+        return out, err, exit_code
+    
+    def status(self) -> dict:
+        """Obtiene estado básico del VPS"""
+        results = {}
+        
+        # Uptime
+        out, _, _ = self.execute("uptime -p")
+        results["uptime"] = out.strip()
+        
+        # Memoria
+        out, _, _ = self.execute("free -h | grep Mem | awk '{print $3\"/\"$2}'")
+        results["memory"] = out.strip()
+        
+        # Disco
+        out, _, _ = self.execute("df -h / | tail -1 | awk '{print $3\"/\"$2\" (\"$5\")\"}'")
+        results["disk"] = out.strip()
+        
+        # CPU load
+        out, _, _ = self.execute("cat /proc/loadavg | awk '{print $1, $2, $3}'")
+        results["load"] = out.strip()
+        
+        # Containers Docker (si hay)
+        out, _, code = self.execute("docker ps --format '{{.Names}}: {{.Status}}' 2>/dev/null | head -5")
+        if code == 0 and out.strip():
+            results["docker"] = out.strip()
+        
+        return results
+    
+    def close(self):
+        """Cierra la conexión"""
+        if self._client:
+            self._client.close()
+            self._client = None
+
+
+# Singleton global
+_vps: Optional[VPSHandler] = None
+
+def get_vps() -> VPSHandler:
+    global _vps
+    if _vps is None:
+        _vps = VPSHandler()
+    return _vps
+
+def vps_execute(command: str, timeout: int = 60) -> str:
+    """Helper para ejecutar comando y devolver resultado formateado"""
+    vps = get_vps()
+    out, err, code = vps.execute(command, timeout)
+    
+    result = []
+    if out:
+        result.append(out)
+    if err:
+        result.append(f"[stderr] {err}")
+    if code != 0:
+        result.append(f"[exit code: {code}]")
+    
+    return "\n".join(result) if result else "(sin output)"
+
+def vps_status() -> str:
+    """Helper para obtener status formateado"""
+    vps = get_vps()
+    status = vps.status()
+    
+    lines = [
+        f"🖥 VPS Status",
+        f"Uptime: {status.get('uptime', 'N/A')}",
+        f"Memory: {status.get('memory', 'N/A')}",
+        f"Disk: {status.get('disk', 'N/A')}",
+        f"Load: {status.get('load', 'N/A')}"
+    ]
+    
+    if "docker" in status:
+        lines.append(f"Docker:\n{status['docker']}")
+    
+    return "\n".join(lines)
