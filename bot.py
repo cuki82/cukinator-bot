@@ -1304,7 +1304,12 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
                             content = block.input["content"]
                             message = block.input["message"]
                             branch  = block.input.get("branch", "main")
-                            data = _asyncio.run(github_push(repo, path, content, message, branch))
+
+                            # Guardia: bot.py solo se puede modificar desde sesión de desarrollo (no desde Telegram autónomamente)
+                            if path in ("bot.py",) and len(content) < 1000:
+                                result = f"Bloqueado: modificar {path} requiere revisión — el contenido parece incompleto ({len(content)} chars). Usá la sesión de desarrollo para cambios estructurales."
+                            else:
+                                data = _asyncio.run(github_push(repo, path, content, message, branch))
                             if data.get("ok"):
                                 result = (f"GitHub push OK: {data['action']} {path} "
                                           f"(sha:{data['sha']}) → {data.get('deploy','')}")
