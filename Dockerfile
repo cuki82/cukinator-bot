@@ -11,9 +11,14 @@ WORKDIR /app
 RUN pip install --no-cache-dir numpy==1.26.4
 RUN pip install --no-cache-dir pyswisseph==2.10.3.2
 RUN pip install --no-cache-dir openai-whisper==20250625
+RUN pip install --no-cache-dir ddgs==9.13.0
+RUN pip install --no-cache-dir fpdf2==2.8.7 geopy==2.4.1 timezonefinder==8.2.2
+RUN pip install --no-cache-dir python-telegram-bot==22.7 anthropic==0.94.0
+RUN pip install --no-cache-dir requests==2.32.5 pytz==2026.1.post1 httpx==0.27.2
+RUN pip install --no-cache-dir gTTS==2.5.4 yt-dlp==2026.3.17
 
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt || true
 
 RUN mkdir -p /data
 
@@ -22,4 +27,3 @@ COPY swiss_engine.py memory_store.py config_store.py reinsurance_kb.py agent_ops
 COPY handlers/ ./handlers/
 
 CMD ["python", "bot.py"]
-# rebuild 1776149812
