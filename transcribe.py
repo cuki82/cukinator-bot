@@ -1,33 +1,32 @@
 #!/usr/bin/env python3
 """
-transcribe.py - Transcribe audio usando faster-whisper
+transcribe.py
+Transcribe audio usando OpenAI Whisper API.
 Uso: python transcribe.py archivo.ogg
-Salida: texto transcrito a stdout
 """
 import sys
 import os
+from openai import OpenAI
 
 def transcribe(audio_path: str) -> str:
-    """Transcribe audio file to text using faster-whisper."""
+    """Transcribe un archivo de audio usando Whisper API."""
     try:
-        from faster_whisper import WhisperModel
+        client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
         
-        # Modelo pequeño para velocidad, CPU only
-        model = WhisperModel("base", device="cpu", compute_type="int8")
+        with open(audio_path, "rb") as audio_file:
+            transcript = client.audio.transcriptions.create(
+                model="whisper-1",
+                file=audio_file,
+                language="es"
+            )
         
-        segments, info = model.transcribe(audio_path, language="es")
-        
-        # Juntar todos los segmentos
-        texto = " ".join(segment.text.strip() for segment in segments)
-        
-        return texto.strip()
-    
+        return transcript.text
     except Exception as e:
         return f"ERROR: {e}"
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("ERROR: Falta path del archivo de audio")
+        print("ERROR: No se especificó archivo de audio")
         sys.exit(1)
     
     audio_path = sys.argv[1]
@@ -36,5 +35,5 @@ if __name__ == "__main__":
         print(f"ERROR: Archivo no encontrado: {audio_path}")
         sys.exit(1)
     
-    result = transcribe(audio_path)
-    print(result)
+    resultado = transcribe(audio_path)
+    print(resultado)
