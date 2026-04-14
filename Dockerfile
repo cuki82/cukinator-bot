@@ -11,6 +11,8 @@ WORKDIR /app
 RUN pip install --no-cache-dir numpy==1.26.4
 RUN pip install --no-cache-dir pyswisseph==2.10.3.2
 RUN pip install --no-cache-dir openai-whisper==20250625
+
+COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 RUN mkdir -p /data
