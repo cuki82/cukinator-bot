@@ -2783,4 +2783,4 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
     log.info("✅ Bot en línea.")
-    app.run_polling(drop_pending_updates=False)
+    app.run_polling(drop_pending_updates=True)
