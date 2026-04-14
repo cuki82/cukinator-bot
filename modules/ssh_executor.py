@@ -1,103 +1,110 @@
 """
-SSH Executor Module - Ejecuta comandos remotos en VPS vía SSH
+Módulo SSH para ejecutar comandos remotos en el VPS
 """
-
-import paramiko
-import io
+import subprocess
+import tempfile
 import os
-from typing import Optional, Tuple
 
-class SSHExecutor:
-    def __init__(self):
-        self.host = os.getenv('SSH_HOST', '31.97.151.119')
-        self.port = int(os.getenv('SSH_PORT', '22'))
-        self.username = os.getenv('SSH_USER', 'root')
-        self.private_key = os.getenv('SSH_PRIVATE_KEY', '')
-    
-    def execute(self, command: str, timeout: int = 30) -> Tuple[bool, str, str]:
-        """
-        Ejecuta un comando en el VPS remoto.
-        
-        Returns:
-            Tuple[bool, str, str]: (success, stdout, stderr)
-        """
-        if not self.private_key:
-            return False, "", "SSH_PRIVATE_KEY no configurada"
-        
-        client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        
-        try:
-            # Cargar clave privada desde string
-            key_file = io.StringIO(self.private_key)
-            private_key = paramiko.Ed25519Key.from_private_key(key_file)
-            
-            # Conectar
-            client.connect(
-                hostname=self.host,
-                port=self.port,
-                username=self.username,
-                pkey=private_key,
-                timeout=10
-            )
-            
-            # Ejecutar comando
-            stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
-            
-            out = stdout.read().decode('utf-8', errors='replace')
-            err = stderr.read().decode('utf-8', errors='replace')
-            exit_code = stdout.channel.recv_exit_status()
-            
-            client.close()
-            
-            return exit_code == 0, out, err
-            
-        except paramiko.AuthenticationException:
-            return False, "", "Error de autenticación SSH"
-        except paramiko.SSHException as e:
-            return False, "", f"Error SSH: {str(e)}"
-        except Exception as e:
-            return False, "", f"Error: {str(e)}"
-        finally:
-            client.close()
-    
-    def test_connection(self) -> Tuple[bool, str]:
-        """Prueba la conexión SSH."""
-        success, out, err = self.execute("echo 'SSH OK' && hostname && uptime")
-        if success:
-            return True, out
-        return False, err
-
-
-# Singleton
-_executor: Optional[SSHExecutor] = None
-
-def get_executor() -> SSHExecutor:
-    global _executor
-    if _executor is None:
-        _executor = SSHExecutor()
-    return _executor
-
-def ssh_execute(command: str, timeout: int = 30) -> dict:
+def execute_ssh_command(command: str, timeout: int = 30) -> dict:
     """
-    Función principal para ejecutar comandos SSH.
-    Retorna dict con: success, output, error
-    """
-    executor = get_executor()
-    success, stdout, stderr = executor.execute(command, timeout)
+    Ejecuta un comando SSH en el VPS configurado.
     
-    return {
-        "success": success,
-        "output": stdout.strip() if stdout else "",
-        "error": stderr.strip() if stderr else "",
-        "command": command
-    }
+    Args:
+        command: Comando a ejecutar
+        timeout: Timeout en segundos (default 30)
+    
+    Returns:
+        dict con 'success', 'output' o 'error'
+    """
+    # Configuración desde variables de entorno
+    host = os.environ.get('SSH_HOST', '31.97.151.119')
+    user = os.environ.get('SSH_USER', 'root')
+    port = os.environ.get('SSH_PORT', '22')
+    private_key = os.environ.get('SSH_PRIVATE_KEY', '')
+    
+    if not private_key:
+        return {
+            'success': False,
+            'error': 'SSH_PRIVATE_KEY no configurada en Railway'
+        }
+    
+    # Convertir \n literales a saltos de línea reales
+    private_key = private_key.replace('\\n', '\n')
+    
+    # Crear archivo temporal con la clave
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.pem', delete=False) as f:
+            f.write(private_key)
+            key_file = f.name
+        
+        # Permisos correctos para la clave
+        os.chmod(key_file, 0o600)
+        
+        # Construir comando SSH
+        ssh_cmd = [
+            'ssh',
+            '-i', key_file,
+            '-o', 'StrictHostKeyChecking=accept-new',
+            '-o', 'ConnectTimeout=10',
+            '-o', 'BatchMode=yes',
+            '-p', port,
+            f'{user}@{host}',
+            command
+        ]
+        
+        # Ejecutar
+        result = subprocess.run(
+            ssh_cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout
+        )
+        
+        # Limpiar archivo temporal
+        os.unlink(key_file)
+        
+        if result.returncode == 0:
+            return {
+                'success': True,
+                'output': result.stdout.strip() or '(sin output)'
+            }
+        else:
+            return {
+                'success': False,
+                'error': f"Error (código {result.returncode}):\n{result.stderr.strip() or result.stdout.strip()}"
+            }
+            
+    except subprocess.TimeoutExpired:
+        if 'key_file' in locals():
+            os.unlink(key_file)
+        return {
+            'success': False,
+            'error': f'Timeout después de {timeout} segundos'
+        }
+    except Exception as e:
+        if 'key_file' in locals():
+            os.unlink(key_file)
+        return {
+            'success': False,
+            'error': f'Error: {str(e)}'
+        }
 
-def ssh_test() -> dict:
-    """Prueba la conexión SSH."""
-    executor = get_executor()
-    success, message = executor.test_connection()
-    return {
-        "success": success,
-        "message": message
+
+def get_vps_status() -> dict:
+    """Obtiene estado básico del VPS"""
+    commands = {
+        'uptime': 'uptime',
+        'disk': 'df -h / | tail -1',
+        'memory': 'free -h | grep Mem',
+        'load': 'cat /proc/loadavg'
     }
+    
+    results = {}
+    for name, cmd in commands.items():
+        result = execute_ssh_command(cmd, timeout=15)
+        if result['success']:
+            results[name] = result['output']
+        else:
+            results[name] = f"Error: {result.get('error', 'unknown')}"
+    
+    return results
