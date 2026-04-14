@@ -1,6 +1,9 @@
+# Dockerfile for Cukinator Bot
 FROM python:3.11-slim
 
-# System dependencies for whisper, audio processing, swisseph
+WORKDIR /app
+
+# System dependencies for audio processing and compilation
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     gcc \
@@ -8,15 +11,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libffi-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Upgrade pip and install setuptools first (needed for whisper build)
+# Upgrade pip and install build tools
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
-# Python dependencies
+# Python dependencies (usando faster-whisper en lugar de openai-whisper)
 RUN pip install --no-cache-dir \
     python-telegram-bot==22.0 \
     anthropic==0.42.0 \
     httpx>=0.27.0 \
-    openai-whisper==20231117 \
+    faster-whisper==1.0.3 \
     pyswisseph==2.10.3.2 \
     requests==2.32.3 \
     duckduckgo-search==7.3.2 \
@@ -24,7 +27,8 @@ RUN pip install --no-cache-dir \
     fpdf2==2.8.1 \
     paramiko==3.4.0
 
-WORKDIR /app
+# Copy application code
 COPY . .
 
+# Run the bot
 CMD ["python", "bot.py"]
