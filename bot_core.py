@@ -1932,11 +1932,46 @@ async def send_long_message(bot, chat_id: int, text: str, reply_to=None, chunk_s
                 await bot.send_message(chat_id=chat_id, text=plain)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    import asyncio, io, threading, queue
+    import asyncio, io, threading, queue, time
     chat_id  = update.effective_chat.id
     user_msg = update.message.text
     name     = update.effective_user.first_name or "Usuario"
-    log.info(f"[{chat_id}] {name}: {user_msg}")
+
+    # ── Deduplicación / agrupación de mensajes múltiples ──────────────────────
+    # Telegram divide mensajes largos en chunks que llegan como mensajes separados.
+    # Esperamos 1.5s y acumulamos todos los chunks antes de procesar.
+    if not hasattr(context, '_msg_buffer'):
+        context._msg_buffer = {}
+    if not hasattr(context, '_msg_timer'):
+        context._msg_timer = {}
+
+    buf_key = f"buf_{chat_id}"
+    timer_key = f"timer_{chat_id}"
+
+    # Acumular mensaje en el buffer
+    if buf_key not in context._msg_buffer:
+        context._msg_buffer[buf_key] = []
+    context._msg_buffer[buf_key].append(user_msg)
+
+    # Si hay un timer activo, cancelarlo y reiniciarlo
+    if timer_key in context._msg_timer:
+        context._msg_timer[timer_key].cancel()
+
+    # Esperar 1.5s para ver si llegan más chunks
+    await asyncio.sleep(1.5)
+
+    # Verificar si este mensaje sigue siendo el último del buffer
+    current_buf = context._msg_buffer.get(buf_key, [])
+    if not current_buf or current_buf[-1] != user_msg:
+        # Llegó otro mensaje después — este chunk ya no es el último, salir
+        return
+
+    # Tomar todos los chunks acumulados y limpiar buffer
+    chunks = context._msg_buffer.pop(buf_key, [user_msg])
+    user_msg = "\n".join(chunks)
+    # ──────────────────────────────────────────────────────────────────────────
+
+    log.info(f"[{chat_id}] {name}: {user_msg[:80]}{'...' if len(user_msg)>80 else ''}")
 
     # Trigger natural para el menú
     msg_lower = user_msg.strip().lower()
