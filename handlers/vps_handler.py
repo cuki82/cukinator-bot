@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 # Intentar importar el módulo SSH
 try:
-    from modules.ssh_vps import SSHManager
+    from modules.ssh import SSHManager
     SSH_AVAILABLE = True
     logger.info("✅ Módulo SSH importado correctamente")
 except ImportError as e:
