@@ -1,110 +1,141 @@
 """
-Módulo SSH para ejecutar comandos remotos en el VPS
+SSH Executor - Ejecuta comandos en VPS remoto via Paramiko
 """
-import subprocess
-import tempfile
 import os
+import io
+import paramiko
+
+# Configuración del VPS
+VPS_HOST = os.getenv('VPS_HOST', '31.97.151.119')
+VPS_USER = os.getenv('VPS_USER', 'root')
+VPS_PORT = int(os.getenv('VPS_PORT', '22'))
 
 def execute_ssh_command(command: str, timeout: int = 30) -> dict:
     """
-    Ejecuta un comando SSH en el VPS configurado.
+    Ejecuta un comando en el VPS via SSH usando Paramiko.
     
     Args:
         command: Comando a ejecutar
-        timeout: Timeout en segundos (default 30)
-    
+        timeout: Timeout en segundos
+        
     Returns:
-        dict con 'success', 'output' o 'error'
+        dict con stdout, stderr, exit_code
     """
-    # Configuración desde variables de entorno
-    host = os.environ.get('SSH_HOST', '31.97.151.119')
-    user = os.environ.get('SSH_USER', 'root')
-    port = os.environ.get('SSH_PORT', '22')
-    private_key = os.environ.get('SSH_PRIVATE_KEY', '')
+    private_key_str = os.getenv('SSH_PRIVATE_KEY', '')
     
-    if not private_key:
+    if not private_key_str:
         return {
             'success': False,
-            'error': 'SSH_PRIVATE_KEY no configurada en Railway'
+            'error': 'SSH_PRIVATE_KEY no configurada',
+            'stdout': '',
+            'stderr': '',
+            'exit_code': -1
         }
     
-    # Convertir \n literales a saltos de línea reales
-    private_key = private_key.replace('\\n', '\n')
+    # Convertir \n literales a newlines reales
+    private_key_str = private_key_str.replace('\\n', '\n')
     
-    # Crear archivo temporal con la clave
+    # Asegurar que termine con newline
+    if not private_key_str.endswith('\n'):
+        private_key_str += '\n'
+    
     try:
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.pem', delete=False) as f:
-            f.write(private_key)
-            key_file = f.name
+        # Cargar la clave privada desde string
+        key_file = io.StringIO(private_key_str)
         
-        # Permisos correctos para la clave
-        os.chmod(key_file, 0o600)
+        # Intentar cargar como Ed25519 primero
+        try:
+            private_key = paramiko.Ed25519Key.from_private_key(key_file)
+        except Exception:
+            # Si falla, intentar como RSA
+            key_file.seek(0)
+            try:
+                private_key = paramiko.RSAKey.from_private_key(key_file)
+            except Exception as e:
+                return {
+                    'success': False,
+                    'error': f'No se pudo cargar la clave SSH: {str(e)}',
+                    'stdout': '',
+                    'stderr': '',
+                    'exit_code': -1
+                }
         
-        # Construir comando SSH
-        ssh_cmd = [
-            'ssh',
-            '-i', key_file,
-            '-o', 'StrictHostKeyChecking=accept-new',
-            '-o', 'ConnectTimeout=10',
-            '-o', 'BatchMode=yes',
-            '-p', port,
-            f'{user}@{host}',
-            command
-        ]
+        # Crear cliente SSH
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         
-        # Ejecutar
-        result = subprocess.run(
-            ssh_cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout
+        # Conectar
+        client.connect(
+            hostname=VPS_HOST,
+            port=VPS_PORT,
+            username=VPS_USER,
+            pkey=private_key,
+            timeout=timeout,
+            look_for_keys=False,
+            allow_agent=False
         )
         
-        # Limpiar archivo temporal
-        os.unlink(key_file)
+        # Ejecutar comando
+        stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
         
-        if result.returncode == 0:
-            return {
-                'success': True,
-                'output': result.stdout.strip() or '(sin output)'
-            }
-        else:
-            return {
-                'success': False,
-                'error': f"Error (código {result.returncode}):\n{result.stderr.strip() or result.stdout.strip()}"
-            }
-            
-    except subprocess.TimeoutExpired:
-        if 'key_file' in locals():
-            os.unlink(key_file)
+        exit_code = stdout.channel.recv_exit_status()
+        stdout_text = stdout.read().decode('utf-8', errors='replace')
+        stderr_text = stderr.read().decode('utf-8', errors='replace')
+        
+        client.close()
+        
+        return {
+            'success': exit_code == 0,
+            'stdout': stdout_text,
+            'stderr': stderr_text,
+            'exit_code': exit_code,
+            'error': None
+        }
+        
+    except paramiko.AuthenticationException as e:
         return {
             'success': False,
-            'error': f'Timeout después de {timeout} segundos'
+            'error': f'Error de autenticación SSH: {str(e)}',
+            'stdout': '',
+            'stderr': '',
+            'exit_code': -1
+        }
+    except paramiko.SSHException as e:
+        return {
+            'success': False,
+            'error': f'Error SSH: {str(e)}',
+            'stdout': '',
+            'stderr': '',
+            'exit_code': -1
         }
     except Exception as e:
-        if 'key_file' in locals():
-            os.unlink(key_file)
         return {
             'success': False,
-            'error': f'Error: {str(e)}'
+            'error': f'Error: {str(e)}',
+            'stdout': '',
+            'stderr': '',
+            'exit_code': -1
         }
 
 
-def get_vps_status() -> dict:
-    """Obtiene estado básico del VPS"""
-    commands = {
-        'uptime': 'uptime',
-        'disk': 'df -h / | tail -1',
-        'memory': 'free -h | grep Mem',
-        'load': 'cat /proc/loadavg'
-    }
+def get_vps_status() -> str:
+    """Obtiene estado básico del VPS."""
+    commands = [
+        "uptime",
+        "free -h | grep Mem",
+        "df -h / | tail -1"
+    ]
     
-    results = {}
-    for name, cmd in commands.items():
-        result = execute_ssh_command(cmd, timeout=15)
+    results = []
+    for cmd in commands:
+        result = execute_ssh_command(cmd, timeout=10)
         if result['success']:
-            results[name] = result['output']
+            results.append(result['stdout'].strip())
         else:
-            results[name] = f"Error: {result.get('error', 'unknown')}"
+            results.append(f"Error: {result.get('error', 'desconocido')}")
     
-    return results
+    return f"""📊 **Estado del VPS**
+    
+🕐 Uptime: {results[0]}
+💾 Memoria: {results[1]}
+💿 Disco: {results[2]}"""
