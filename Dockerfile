@@ -1,29 +1,46 @@
-FROM python:3.11
-
-RUN apt-get update && apt-get install -y \
-    ffmpeg gcc g++ \
-    fonts-dejavu-mono \
-    espeak-ng \
-    && rm -rf /var/lib/apt/lists/*
+FROM python:3.11-slim
 
 WORKDIR /app
 
-# Instalar en orden para evitar conflictos de cache
-RUN pip install --no-cache-dir --upgrade pip
-RUN pip install --no-cache-dir numpy==1.26.4
-RUN pip install --no-cache-dir pyswisseph==2.10.3.2
-RUN pip install --no-cache-dir openai-whisper==20250625
-RUN pip install --no-cache-dir ddgs==9.13.0
-RUN pip install --no-cache-dir "python-telegram-bot[job-queue]==22.7"
-RUN pip install --no-cache-dir anthropic==0.94.0
-RUN pip install --no-cache-dir fpdf2==2.8.7 geopy==2.4.1 timezonefinder==8.2.2
-RUN pip install --no-cache-dir requests==2.32.5 pytz==2026.1.post1 httpx==0.27.2
-RUN pip install --no-cache-dir gTTS==2.5.4 yt-dlp==2026.3.17
+# System dependencies for whisper, audio processing, and Swiss Ephemeris
+RUN apt-get update && apt-get install -y \
+    ffmpeg \
+    libsndfile1 \
+    git \
+    build-essential \
+    libffi-dev \
+    && rm -rf /var/lib/apt/lists/*
 
+# Copy requirements first for better caching
+COPY requirements.txt .
+
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Install specific versions that work together
+RUN pip install --no-cache-dir \
+    openai-whisper==20250625 \
+    ddgs==9.13.0 \
+    python-telegram-bot==22.7
+
+# Copy application code
+COPY bot.py .
+COPY bot_core.py .
+COPY swiss_engine.py .
+COPY memory_store.py .
+COPY config_store.py .
+COPY agent_ops.py .
+COPY reinsurance_kb.py .
+COPY transcribe.py .
+COPY handlers/ ./handlers/
+COPY modules/ ./modules/
+
+# Create data directory for persistent storage
 RUN mkdir -p /data
 
-COPY bot.py bot_core.py transcribe.py ./
-COPY swiss_engine.py memory_store.py config_store.py reinsurance_kb.py agent_ops.py ./
-COPY handlers/ ./handlers/
+# Set environment variables
+ENV PYTHONUNBUFFERED=1
+ENV DB_PATH=/data/memory.db
 
+# Run the bot
 CMD ["python", "bot.py"]
