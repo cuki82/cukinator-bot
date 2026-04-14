@@ -1,39 +1,17 @@
 #!/usr/bin/env python3
-"""
-transcribe.py
-Transcribe audio usando OpenAI Whisper API.
-Uso: python transcribe.py archivo.ogg
-"""
-import sys
-import os
-from openai import OpenAI
+"""Transcripcion de audio con Whisper local. Uso: transcribe.py <audio_path>"""
+import sys, warnings, os
+warnings.filterwarnings("ignore")
 
-def transcribe(audio_path: str) -> str:
-    """Transcribe un archivo de audio usando Whisper API."""
-    try:
-        client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
-        
-        with open(audio_path, "rb") as audio_file:
-            transcript = client.audio.transcriptions.create(
-                model="whisper-1",
-                file=audio_file,
-                language="es"
-            )
-        
-        return transcript.text
-    except Exception as e:
-        return f"ERROR: {e}"
+if len(sys.argv) < 2 or not os.path.exists(sys.argv[1]):
+    sys.exit(1)
 
-if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("ERROR: No se especificó archivo de audio")
-        sys.exit(1)
-    
-    audio_path = sys.argv[1]
-    
-    if not os.path.exists(audio_path):
-        print(f"ERROR: Archivo no encontrado: {audio_path}")
-        sys.exit(1)
-    
-    resultado = transcribe(audio_path)
-    print(resultado)
+try:
+    import whisper
+    model = whisper.load_model("base")
+    result = model.transcribe(sys.argv[1], language="es")
+    texto = result["text"].strip()
+    print(texto, flush=True)
+except Exception as e:
+    sys.stderr.write(f"ERROR:{e}\n")
+    sys.exit(1)
