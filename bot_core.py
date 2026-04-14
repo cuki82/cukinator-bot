@@ -8,7 +8,6 @@ import os
 import os
 import tempfile
 import swisseph as swe
-import whisper
 import anthropic
 from ddgs import DDGS
 from fpdf import FPDF

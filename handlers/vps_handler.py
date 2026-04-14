@@ -1,177 +1,100 @@
 """
-VPS Handler - Conexión SSH a servidores remotos
+handlers/vps_handler.py — Comandos VPS via SSH
 """
-import paramiko
 import logging
-from typing import Optional, Tuple
+from telegram import Update
+from telegram.ext import ContextTypes
+
+from modules.ssh_executor import execute_ssh_command
 
 log = logging.getLogger(__name__)
 
-# Configuración por defecto (puede ser overrideada por config en DB)
-DEFAULT_CONFIG = {
-    "host": None,
-    "port": 22,
-    "username": None,
-    "password": None,
-    "key_path": None,
-    "timeout": 30
+# Comandos permitidos (whitelist por seguridad)
+ALLOWED_COMMANDS = {
+    "status": "uptime && df -h / && free -h | head -2",
+    "uptime": "uptime",
+    "disk": "df -h",
+    "memory": "free -h",
+    "processes": "ps aux --sort=-%cpu | head -15",
+    "docker": "docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'",
+    "logs": "journalctl -n 50 --no-pager",
+    "network": "ss -tuln | head -20",
+    "load": "cat /proc/loadavg && nproc",
 }
 
-_cached_client: Optional[paramiko.SSHClient] = None
 
-def get_ssh_client(
-    host: str,
-    username: str,
-    password: Optional[str] = None,
-    key_path: Optional[str] = None,
-    port: int = 22,
-    timeout: int = 30
-) -> paramiko.SSHClient:
-    """Crea y retorna un cliente SSH conectado."""
-    global _cached_client
-    
-    # Si ya hay conexión activa al mismo host, reutilizar
-    if _cached_client is not None:
-        try:
-            _cached_client.exec_command("echo ping", timeout=5)
-            return _cached_client
-        except:
-            _cached_client = None
-    
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    
-    connect_kwargs = {
-        "hostname": host,
-        "port": port,
-        "username": username,
-        "timeout": timeout,
-        "allow_agent": False,
-        "look_for_keys": False
-    }
-    
-    if key_path:
-        connect_kwargs["key_filename"] = key_path
-    elif password:
-        connect_kwargs["password"] = password
-    else:
-        raise ValueError("Se requiere password o key_path para conectar")
-    
-    client.connect(**connect_kwargs)
-    _cached_client = client
-    log.info(f"SSH conectado a {username}@{host}:{port}")
-    
-    return client
-
-
-def ssh_exec(
-    command: str,
-    host: str,
-    username: str,
-    password: Optional[str] = None,
-    key_path: Optional[str] = None,
-    port: int = 22,
-    timeout: int = 30
-) -> Tuple[str, str, int]:
+async def vps_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Ejecuta un comando SSH y retorna (stdout, stderr, exit_code).
+    /vps <comando> - Ejecuta comandos en el VPS
+    
+    Comandos predefinidos: status, uptime, disk, memory, processes, docker, logs, network, load
+    Comando custom: /vps run <comando>
     """
+    user_id = update.effective_user.id
+    
+    # Solo owner puede usar VPS
+    OWNER_ID = 8626420783
+    if user_id != OWNER_ID:
+        await update.message.reply_text("No tenés permiso para usar comandos VPS.")
+        return
+    
+    if not context.args:
+        help_text = """*Comandos VPS disponibles:*
+
+`/vps status` — Estado general
+`/vps uptime` — Uptime del servidor
+`/vps disk` — Uso de disco
+`/vps memory` — Uso de memoria
+`/vps processes` — Top procesos por CPU
+`/vps docker` — Containers Docker
+`/vps logs` — Últimos logs del sistema
+`/vps network` — Puertos abiertos
+`/vps load` — Load average
+
+`/vps run <comando>` — Comando custom"""
+        await update.message.reply_text(help_text, parse_mode="Markdown")
+        return
+    
+    cmd_name = context.args[0].lower()
+    
+    # Comando custom
+    if cmd_name == "run" and len(context.args) > 1:
+        custom_cmd = " ".join(context.args[1:])
+        log.info(f"VPS custom command from {user_id}: {custom_cmd}")
+        await execute_and_reply(update, custom_cmd)
+        return
+    
+    # Comando predefinido
+    if cmd_name in ALLOWED_COMMANDS:
+        command = ALLOWED_COMMANDS[cmd_name]
+        log.info(f"VPS command from {user_id}: {cmd_name}")
+        await execute_and_reply(update, command)
+        return
+    
+    await update.message.reply_text(f"Comando no reconocido: `{cmd_name}`\nUsá `/vps` para ver opciones.", parse_mode="Markdown")
+
+
+async def execute_and_reply(update: Update, command: str):
+    """Ejecuta comando SSH y envía resultado"""
+    msg = await update.message.reply_text("Ejecutando...")
+    
     try:
-        client = get_ssh_client(host, username, password, key_path, port, timeout)
+        result = execute_ssh_command(command, timeout=30)
         
-        stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
+        if result["success"]:
+            output = result["stdout"].strip() or "(sin output)"
+        else:
+            if result["error"]:
+                output = f"Error: {result['error']}"
+            else:
+                output = f"Exit code {result['exit_code']}:\n{result['stderr']}"
         
-        exit_code = stdout.channel.recv_exit_status()
-        stdout_str = stdout.read().decode('utf-8', errors='replace')
-        stderr_str = stderr.read().decode('utf-8', errors='replace')
+        # Truncar si es muy largo
+        if len(output) > 4000:
+            output = output[:4000] + "\n... (truncado)"
         
-        log.info(f"SSH exec '{command[:50]}...' -> exit {exit_code}")
+        await msg.edit_text(f"```\n{output}\n```", parse_mode="Markdown")
         
-        return stdout_str, stderr_str, exit_code
-        
-    except paramiko.AuthenticationException:
-        return "", "Error de autenticación SSH", 1
-    except paramiko.SSHException as e:
-        return "", f"Error SSH: {e}", 1
     except Exception as e:
-        return "", f"Error de conexión: {e}", 1
-
-
-def ssh_close():
-    """Cierra la conexión SSH cacheada."""
-    global _cached_client
-    if _cached_client:
-        try:
-            _cached_client.close()
-        except:
-            pass
-        _cached_client = None
-        log.info("SSH conexión cerrada")
-
-
-def vps_status(host: str, username: str, password: Optional[str] = None, 
-               key_path: Optional[str] = None, port: int = 22) -> str:
-    """Obtiene estado básico del VPS: uptime, memoria, disco."""
-    commands = [
-        ("Uptime", "uptime"),
-        ("Memoria", "free -h | grep Mem"),
-        ("Disco", "df -h / | tail -1"),
-        ("Load", "cat /proc/loadavg"),
-    ]
-    
-    results = []
-    for label, cmd in commands:
-        stdout, stderr, code = ssh_exec(cmd, host, username, password, key_path, port)
-        if code == 0 and stdout.strip():
-            results.append(f"{label}: {stdout.strip()}")
-        elif stderr:
-            results.append(f"{label}: Error - {stderr.strip()}")
-    
-    return "\n".join(results) if results else "No se pudo obtener estado del VPS"
-
-
-def vps_docker_ps(host: str, username: str, password: Optional[str] = None,
-                  key_path: Optional[str] = None, port: int = 22) -> str:
-    """Lista contenedores Docker corriendo."""
-    stdout, stderr, code = ssh_exec(
-        "docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'",
-        host, username, password, key_path, port
-    )
-    
-    if code != 0:
-        return f"Error listando containers: {stderr or 'comando falló'}"
-    
-    return stdout.strip() if stdout.strip() else "No hay containers corriendo"
-
-
-def vps_docker_logs(container: str, lines: int, host: str, username: str,
-                    password: Optional[str] = None, key_path: Optional[str] = None,
-                    port: int = 22) -> str:
-    """Obtiene logs de un container Docker."""
-    stdout, stderr, code = ssh_exec(
-        f"docker logs --tail {lines} {container} 2>&1",
-        host, username, password, key_path, port
-    )
-    
-    if code != 0 and not stdout:
-        return f"Error obteniendo logs: {stderr or 'container no encontrado'}"
-    
-    return stdout.strip() if stdout.strip() else "Sin logs"
-
-
-def vps_service_status(service: str, host: str, username: str,
-                       password: Optional[str] = None, key_path: Optional[str] = None,
-                       port: int = 22) -> str:
-    """Verifica estado de un servicio systemd."""
-    stdout, stderr, code = ssh_exec(
-        f"systemctl status {service} --no-pager -l",
-        host, username, password, key_path, port
-    )
-    
-    # systemctl devuelve código != 0 si el servicio está parado, pero igual hay output
-    if stdout.strip():
-        return stdout.strip()
-    elif stderr.strip():
-        return f"Error: {stderr.strip()}"
-    else:
-        return f"Servicio '{service}' no encontrado"
+        log.error(f"VPS error: {e}")
+        await msg.edit_text(f"Error ejecutando comando: {e}")
