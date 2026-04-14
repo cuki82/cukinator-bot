@@ -1,46 +1,43 @@
 """
-Handler para comandos VPS/SSH
+Handler para comandos VPS/SSH - Autocontenido
 """
 import logging
 import os
 import asyncio
+import tempfile
+from telegram import Update
+from telegram.ext import ContextTypes
 
 log = logging.getLogger(__name__)
 
 # Configuración SSH desde variables de entorno
 SSH_HOST = os.getenv("SSH_HOST")
 SSH_USER = os.getenv("SSH_USER", "root")
-SSH_KEY = os.getenv("SSH_PRIVATE_KEY")
 SSH_PORT = int(os.getenv("SSH_PORT", "22"))
+SSH_PRIVATE_KEY = os.getenv("SSH_PRIVATE_KEY")
 
-# Verificar si tenemos credenciales
-SSH_AVAILABLE = bool(SSH_HOST and SSH_KEY)
+def is_ssh_configured():
+    """Verifica si SSH está configurado"""
+    return bool(SSH_HOST and SSH_PRIVATE_KEY)
 
-if SSH_AVAILABLE:
-    log.info(f"✅ SSH configurado para {SSH_USER}@{SSH_HOST}:{SSH_PORT}")
-else:
-    log.warning("⚠️ SSH no configurado. Faltan SSH_HOST o SSH_PRIVATE_KEY")
-
-
-async def run_ssh_command(command: str) -> dict:
-    """Ejecuta un comando SSH usando asyncio subprocess"""
-    if not SSH_AVAILABLE:
-        return {"success": False, "error": "SSH no configurado"}
+async def run_ssh_command(command: str, timeout: int = 30) -> str:
+    """Ejecuta un comando SSH en el VPS"""
+    if not is_ssh_configured():
+        return "❌ SSH no configurado. Faltan SSH_HOST o SSH_PRIVATE_KEY en variables de entorno."
     
+    # Crear archivo temporal con la key
+    key_file = None
     try:
-        # Crear archivo temporal con la key
-        import tempfile
-        with tempfile.NamedTemporaryFile(mode='w', suffix='_key', delete=False) as f:
-            f.write(SSH_KEY)
-            key_file = f.name
-        
-        # Asegurar permisos correctos
-        os.chmod(key_file, 0o600)
+        key_file = tempfile.NamedTemporaryFile(mode='w', suffix='.pem', delete=False)
+        key_content = SSH_PRIVATE_KEY.replace('\\n', '\n')
+        key_file.write(key_content)
+        key_file.close()
+        os.chmod(key_file.name, 0o600)
         
         # Construir comando SSH
         ssh_cmd = [
             "ssh",
-            "-i", key_file,
+            "-i", key_file.name,
             "-o", "StrictHostKeyChecking=no",
             "-o", "UserKnownHostsFile=/dev/null",
             "-o", "ConnectTimeout=10",
@@ -58,76 +55,97 @@ async def run_ssh_command(command: str) -> dict:
         
         stdout, stderr = await asyncio.wait_for(
             process.communicate(),
-            timeout=30
+            timeout=timeout
         )
         
-        # Limpiar key temporal
-        os.unlink(key_file)
+        output = stdout.decode('utf-8', errors='replace').strip()
+        errors = stderr.decode('utf-8', errors='replace').strip()
         
-        if process.returncode == 0:
-            return {
-                "success": True,
-                "output": stdout.decode('utf-8', errors='replace')
-            }
-        else:
-            return {
-                "success": False,
-                "error": stderr.decode('utf-8', errors='replace') or f"Exit code: {process.returncode}"
-            }
-            
+        if process.returncode != 0:
+            return f"❌ Error (código {process.returncode}):\n{errors or output}"
+        
+        return output if output else "(sin output)"
+        
     except asyncio.TimeoutError:
-        return {"success": False, "error": "Timeout (30s)"}
+        return f"❌ Timeout después de {timeout}s"
     except Exception as e:
-        log.error(f"Error SSH: {e}")
-        return {"success": False, "error": str(e)}
+        return f"❌ Error SSH: {str(e)}"
+    finally:
+        if key_file and os.path.exists(key_file.name):
+            os.unlink(key_file.name)
 
 
-async def vps_command(update, context):
+# Comandos predefinidos
+VPS_COMMANDS = {
+    "status": "echo '=== SISTEMA ===' && uptime && echo && echo '=== MEMORIA ===' && free -h && echo && echo '=== DISCO ===' && df -h / && echo && echo '=== DOCKER ===' && docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' 2>/dev/null || echo 'Docker no disponible'",
+    "uptime": "uptime",
+    "memory": "free -h",
+    "disk": "df -h",
+    "docker": "docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'",
+    "docker-all": "docker ps -a --format 'table {{.Names}}\t{{.Status}}'",
+    "logs": "docker logs --tail 50 $(docker ps -q | head -1) 2>/dev/null || journalctl -n 50 --no-pager",
+    "top": "ps aux --sort=-%mem | head -10",
+    "ip": "curl -s ifconfig.me && echo",
+    "reboot": "sudo reboot",
+}
+
+
+async def vps_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comando /vps - ejecuta comandos en el servidor remoto"""
-    from telegram import Update
-    from telegram.ext import ContextTypes
+    user_id = update.effective_user.id
+    log.info(f"📟 /vps recibido de user_id={user_id}")
     
-    log.info(f"📟 /vps recibido de user_id={update.effective_user.id}")
-    
-    if not SSH_AVAILABLE:
-        log.error("❌ SSH no configurado")
+    # Verificar configuración
+    if not is_ssh_configured():
         await update.message.reply_text(
-            "SSH no configurado.\n"
-            "Necesito las variables: SSH_HOST, SSH_PRIVATE_KEY\n"
-            "Opcional: SSH_USER (default: root), SSH_PORT (default: 22)"
+            "⚠️ SSH no configurado.\n\n"
+            "Necesito estas variables en Railway:\n"
+            "• `SSH_HOST` - IP o dominio del VPS\n"
+            "• `SSH_PRIVATE_KEY` - Key privada completa\n"
+            "• `SSH_USER` - Usuario (default: root)\n"
+            "• `SSH_PORT` - Puerto (default: 22)",
+            parse_mode="Markdown"
         )
         return
     
-    # Obtener el comando a ejecutar
-    if context.args:
-        command = " ".join(context.args)
+    # Obtener argumentos
+    args = " ".join(context.args) if context.args else ""
+    
+    # Sin argumentos = mostrar ayuda
+    if not args:
+        commands_list = "\n".join([f"• `{cmd}`" for cmd in VPS_COMMANDS.keys()])
+        await update.message.reply_text(
+            f"🖥️ *VPS Control*\n\n"
+            f"*Comandos rápidos:*\n{commands_list}\n\n"
+            f"*Uso:*\n"
+            f"`/vps status` - Estado general\n"
+            f"`/vps <comando>` - Ejecutar comando custom\n\n"
+            f"*Conectado a:* `{SSH_USER}@{SSH_HOST}`",
+            parse_mode="Markdown"
+        )
+        return
+    
+    # Determinar comando a ejecutar
+    if args.lower() in VPS_COMMANDS:
+        command = VPS_COMMANDS[args.lower()]
+        label = args.lower()
     else:
-        await update.message.reply_text(
-            "Uso: /vps <comando>\n"
-            "Ejemplo: /vps uptime\n"
-            "Ejemplo: /vps df -h\n"
-            "Ejemplo: /vps free -m"
-        )
-        return
+        command = args
+        label = "custom"
+    
+    # Feedback inmediato
+    msg = await update.message.reply_text(f"⏳ Ejecutando `{label}`...", parse_mode="Markdown")
     
     try:
-        await update.message.reply_text(f"⏳ Ejecutando: {command}")
         result = await run_ssh_command(command)
         
         # Formatear respuesta
-        if result.get("success"):
-            output = result.get("output", "").strip()
-            if output:
-                # Truncar si es muy largo
-                if len(output) > 4000:
-                    output = output[:4000] + "\n... (truncado)"
-                await update.message.reply_text(f"```\n{output}\n```", parse_mode="Markdown")
-            else:
-                await update.message.reply_text("✅ Comando ejecutado (sin output)")
-        else:
-            error = result.get("error", "Error desconocido")
-            await update.message.reply_text(f"❌ Error: {error}")
-            
+        response = f"```\n{result[:3500]}\n```"
+        if len(result) > 3500:
+            response += "\n_(output truncado)_"
+        
+        await msg.edit_text(response, parse_mode="Markdown")
+        
     except Exception as e:
-        log.error(f"Error ejecutando comando SSH: {e}")
-        await update.message.reply_text(f"❌ Error: {str(e)}")
+        log.error(f"Error en /vps: {e}")
+        await msg.edit_text(f"❌ Error: {str(e)}")
