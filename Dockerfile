@@ -22,3 +22,4 @@ COPY swiss_engine.py memory_store.py config_store.py reinsurance_kb.py agent_ops
 COPY handlers/ ./handlers/
 
 CMD ["python", "bot.py"]
+# rebuild 1776149812
