@@ -119,3 +119,56 @@ def run_ssh_command(command: str) -> str:
         return f"Error: {result['error']}"
     else:
         return f"Error (exit {result['exit_code']}): {result['stderr']}"
+
+
+def read_file_sftp(path: str) -> dict:
+    """Lee un archivo del VPS via SFTP."""
+    client = None
+    try:
+        private_key = get_private_key()
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.connect(hostname=VPS_HOST, port=VPS_PORT, username=VPS_USER,
+                       pkey=private_key, timeout=15, look_for_keys=False, allow_agent=False)
+        sftp = client.open_sftp()
+        with sftp.file(path, "r") as f:
+            content = f.read().decode("utf-8", errors="replace")
+        sftp.close()
+        return {"success": True, "content": content, "path": path}
+    except Exception as e:
+        logger.error(f"SFTP read error: {e}")
+        return {"success": False, "error": str(e)}
+    finally:
+        if client:
+            client.close()
+
+
+def write_file_sftp(path: str, content: str) -> dict:
+    """Escribe un archivo en el VPS via SFTP."""
+    client = None
+    try:
+        private_key = get_private_key()
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.connect(hostname=VPS_HOST, port=VPS_PORT, username=VPS_USER,
+                       pkey=private_key, timeout=15, look_for_keys=False, allow_agent=False)
+        sftp = client.open_sftp()
+        # Crear directorios si no existen
+        import posixpath
+        dir_path = posixpath.dirname(path)
+        try:
+            sftp.stat(dir_path)
+        except FileNotFoundError:
+            # mkdir -p via SSH
+            client.exec_command(f"mkdir -p {dir_path}")
+            import time; time.sleep(0.5)
+        with sftp.file(path, "w") as f:
+            f.write(content.encode("utf-8"))
+        sftp.close()
+        return {"success": True, "path": path, "bytes": len(content.encode())}
+    except Exception as e:
+        logger.error(f"SFTP write error: {e}")
+        return {"success": False, "error": str(e)}
+    finally:
+        if client:
+            client.close()
