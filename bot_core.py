@@ -1081,6 +1081,75 @@ TOOLS = [
             },
             "required": ["instruction", "action", "result"]
         }
+    },
+    {
+        "name": "vps_exec",
+        "description": (
+            "Ejecuta un comando SSH en el VPS remoto (Hostinger). "
+            "Usá para administrar servicios, consultar estado, ejecutar scripts, modificar configuraciones. "
+            "Ejemplos: 'docker ps', 'systemctl restart nginx', 'cat /etc/nginx/nginx.conf', "
+            "'docker logs open-webui --tail 50', 'docker restart litellm'. "
+            "Para cambios de archivos usá vps_escribir_archivo. Para leer archivos usá vps_leer_archivo."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "description": "Comando SSH a ejecutar en el VPS"},
+                "timeout": {"type": "integer", "description": "Timeout en segundos (default 30)"}
+            },
+            "required": ["command"]
+        }
+    },
+    {
+        "name": "vps_leer_archivo",
+        "description": (
+            "Lee el contenido de un archivo del VPS via SFTP. "
+            "Usá antes de modificar cualquier archivo para ver el contenido actual. "
+            "Ejemplos: '/etc/nginx/nginx.conf', '/opt/open-webui/config.json', "
+            "'/app/docker-compose.yml', archivos CSS o JS de Open WebUI."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Path absoluto del archivo en el VPS"}
+            },
+            "required": ["path"]
+        }
+    },
+    {
+        "name": "vps_escribir_archivo",
+        "description": (
+            "Escribe o sobreescribe un archivo en el VPS via SFTP. "
+            "Usá para modificar configs, CSS, scripts, docker-compose, etc. "
+            "SIEMPRE leer el archivo primero con vps_leer_archivo antes de escribir. "
+            "Crea los directorios intermedios automáticamente."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path":    {"type": "string", "description": "Path absoluto del archivo en el VPS"},
+                "content": {"type": "string", "description": "Contenido completo del archivo a escribir"}
+            },
+            "required": ["path", "content"]
+        }
+    },
+    {
+        "name": "vps_docker",
+        "description": (
+            "Control de contenedores Docker en el VPS. "
+            "Acciones: 'ps' (listar), 'restart' (reiniciar), 'logs' (ver logs), "
+            "'stats' (recursos), 'stop', 'start', 'inspect' (configuración completa). "
+            "Usá para gestionar Open WebUI, LiteLLM, Ollama y cualquier otro contenedor."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action":    {"type": "string", "description": "ps | restart | logs | stats | stop | start | inspect"},
+                "container": {"type": "string", "description": "Nombre del contenedor (ej: open-webui, litellm, ollama). Opcional para ps y stats."},
+                "tail":      {"type": "integer", "description": "Líneas de logs a mostrar (default 50, solo para action=logs)"}
+            },
+            "required": ["action"]
+        }
     }
 ]
 
@@ -1212,6 +1281,22 @@ AUDIOS Y VOZ:
 - Si el usuario manda un AUDIO → podés responder con voz usando enviar_voz (solo si la respuesta es corta y conversacional).
 - Si el usuario dice "respondeme con voz", "mandame un audio", "quiero escucharte" → usá enviar_voz.
 - NUNCA digas que no podés mandar audio o que no tenés esa capacidad.
+
+VPS — CONTROL REMOTO TOTAL:
+Tenés acceso SSH completo al VPS de Hostinger. Servicios corriendo: Open WebUI, LiteLLM, Ollama (Docker).
+Herramientas disponibles:
+- vps_exec: ejecutar cualquier comando SSH
+- vps_leer_archivo: leer cualquier archivo del VPS
+- vps_escribir_archivo: modificar cualquier archivo del VPS
+- vps_docker: control de contenedores (ps, restart, logs, stats, stop, start)
+
+PROTOCOLO VPS:
+- Ante cualquier pedido de cambio en el VPS: EJECUTALO directamente con las tools.
+- Para cambios de configuración: leer archivo → modificar → escribir → reiniciar servicio si es necesario.
+- Para cambios de frontend (CSS, JS): leer archivo → aplicar cambio → escribir → docker restart del servicio.
+- Para ver estado: usar vps_docker action=ps o vps_exec con el comando apropiado.
+- Tras cambios importantes: registrar con agent_log.
+- NUNCA digas que no podés hacer algo en el VPS. Si tenés SSH, podés hacerlo.
 
 VIDEOS — REGLA CRÍTICA:
 - SÍ PODÉS buscar y mandar links de YouTube. Usás buscar_video. SIEMPRE funciona.
@@ -1879,6 +1964,91 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
                             result = "Cambio registrado en changelog."
                         except Exception as e:
                             result = f"Error: {e}"
+
+                    elif block.name == "vps_exec":
+                        try:
+                            from modules.ssh_executor import execute_ssh_command
+                            cmd     = block.input["command"]
+                            timeout = block.input.get("timeout", 30)
+                            log.info(f"[{chat_id}] VPS exec: {cmd[:80]}")
+                            res = execute_ssh_command(cmd, timeout=timeout)
+                            if res["success"]:
+                                out = res["stdout"].strip() or "(sin output)"
+                                result = out[:3000]
+                            else:
+                                err = res["error"] or res["stderr"]
+                                result = f"Error (exit {res['exit_code']}): {err[:500]}"
+                            log_change(instruction=cmd, action=f"vps_exec: {cmd[:60]}",
+                                       result=result[:200], chat_id=chat_id, db_path=DB_PATH)
+                        except Exception as e:
+                            result = f"Error SSH: {e}"
+                            log.error(f"vps_exec error: {e}")
+
+                    elif block.name == "vps_leer_archivo":
+                        try:
+                            from modules.ssh_executor import read_file_sftp
+                            path = block.input["path"]
+                            log.info(f"[{chat_id}] VPS leer: {path}")
+                            res = read_file_sftp(path)
+                            if res["success"]:
+                                content = res["content"]
+                                result = content[:4000] + ("\n...(truncado)" if len(content) > 4000 else "")
+                            else:
+                                result = f"Error leyendo {path}: {res['error']}"
+                        except Exception as e:
+                            result = f"Error SFTP read: {e}"
+                            log.error(f"vps_leer error: {e}")
+
+                    elif block.name == "vps_escribir_archivo":
+                        try:
+                            from modules.ssh_executor import write_file_sftp
+                            path    = block.input["path"]
+                            content = block.input["content"]
+                            log.info(f"[{chat_id}] VPS escribir: {path} ({len(content)} chars)")
+                            res = write_file_sftp(path, content)
+                            if res["success"]:
+                                result = f"Archivo escrito: {path} ({res['bytes']} bytes)"
+                                log_change(instruction=f"escribir {path}",
+                                           action=f"vps_escribir_archivo: {path}",
+                                           result=result, chat_id=chat_id, db_path=DB_PATH)
+                            else:
+                                result = f"Error escribiendo {path}: {res['error']}"
+                        except Exception as e:
+                            result = f"Error SFTP write: {e}"
+                            log.error(f"vps_escribir error: {e}")
+
+                    elif block.name == "vps_docker":
+                        try:
+                            from modules.ssh_executor import execute_ssh_command
+                            action    = block.input["action"]
+                            container = block.input.get("container", "")
+                            tail      = block.input.get("tail", 50)
+                            cmd_map = {
+                                "ps":      "docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'",
+                                "stats":   "docker stats --no-stream --format 'table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}'",
+                                "restart": f"docker restart {container}",
+                                "stop":    f"docker stop {container}",
+                                "start":   f"docker start {container}",
+                                "logs":    f"docker logs {container} --tail {tail}",
+                                "inspect": f"docker inspect {container}",
+                            }
+                            cmd = cmd_map.get(action)
+                            if not cmd:
+                                result = f"Acción no reconocida: {action}. Opciones: ps, stats, restart, stop, start, logs, inspect"
+                            else:
+                                log.info(f"[{chat_id}] Docker {action}: {container or 'all'}")
+                                res = execute_ssh_command(cmd, timeout=30)
+                                if res["success"]:
+                                    out = res["stdout"].strip() or "(sin output)"
+                                    result = out[:3000]
+                                else:
+                                    result = f"Error docker {action}: {res['error'] or res['stderr']}"
+                                log_change(instruction=f"docker {action} {container}",
+                                           action=cmd, result=result[:200],
+                                           chat_id=chat_id, db_path=DB_PATH)
+                        except Exception as e:
+                            result = f"Error docker: {e}"
+                            log.error(f"vps_docker error: {e}")
 
                     else:
                         result = "Herramienta no reconocida."
