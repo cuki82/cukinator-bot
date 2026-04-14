@@ -26,3 +26,4 @@ RUN mkdir -p /data
 COPY bot.py transcribe.py swiss_engine.py memory_store.py config_store.py reinsurance_kb.py agent_ops.py ./
 
 CMD ["python", "bot.py"]
+# rebuild 1776140727
