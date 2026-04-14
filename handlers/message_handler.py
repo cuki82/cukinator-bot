@@ -1,0 +1,244 @@
+"""
+handlers/message_handler.py
+Maneja mensajes de texto y audio del usuario.
+Importa las funciones de negocio desde bot_core.py (el monolítico renombrado).
+"""
+import os
+import io
+import sys
+import logging
+import asyncio
+import threading
+import queue
+import subprocess
+import tempfile
+
+from telegram import Update
+from telegram.ext import ContextTypes
+
+log = logging.getLogger(__name__)
+
+# Importar core desde el módulo principal
+from bot_core import (
+    ask_claude, save_message_full, send_long_message,
+    texto_a_voz, es_respuesta_larga, DB_PATH, OWNER_CHAT_ID
+)
+
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    import asyncio, io, threading, queue
+    chat_id  = update.effective_chat.id
+    user_msg = update.message.text
+    name     = update.effective_user.first_name or "Usuario"
+    log.info(f"[{chat_id}] {name}: {user_msg}")
+
+    msg_lower = user_msg.strip().lower()
+    if msg_lower in ("menu", "menú", "abri el menu", "abrí el menú", "ver menu", "ver menú"):
+        from handlers.callback_handler import cmd_menu
+        await cmd_menu(update, context)
+        return
+    if msg_lower in ("biblioteca", "librería", "libreria", "knowledge base", "kb", "kb reaseguros"):
+        from handlers.callback_handler import cmd_biblioteca
+        await cmd_biblioteca(update, context)
+        return
+
+    await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+
+    try:
+        q = queue.Queue()
+
+        def run_claude():
+            try:
+                pidio_voz = any(w in user_msg.lower() for w in
+                    ["voz", "audio", "escuchar", "hablame", "háblame",
+                     "respondé con voz", "responde con voz", "mandame un audio", "en audio"])
+                q.put(("ok", ask_claude(chat_id, user_msg, user_name=name, allow_voice=pidio_voz)))
+            except Exception as e:
+                q.put(("err", str(e)))
+
+        t = threading.Thread(target=run_claude, daemon=True)
+        t.start()
+
+        elapsed = 0
+        while t.is_alive() and elapsed < 90:
+            await asyncio.sleep(4)
+            elapsed += 4
+            if t.is_alive():
+                try:
+                    await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+                except Exception:
+                    pass
+
+        t.join(timeout=1)
+        if t.is_alive():
+            save_message_full(chat_id, "user", user_msg, db_path=DB_PATH)
+            await update.message.reply_text("Tardo demasiado, intentalo de nuevo.")
+            return
+
+        status, payload = q.get(timeout=2)
+        if status == "err":
+            raise Exception(payload)
+
+        reply, pdf_path, extra_files = payload
+        save_message_full(chat_id, "user",      user_msg, db_path=DB_PATH)
+        save_message_full(chat_id, "assistant", reply,    db_path=DB_PATH)
+
+        pidio_voz_explicito = any(w in user_msg.lower() for w in
+            ["voz", "audio", "escuchar", "hablame", "háblame",
+             "respondé con voz", "responde con voz", "mandame un audio"])
+        if not pidio_voz_explicito:
+            extra_files = [(n, c, cap) for n, c, cap in extra_files if cap != "voice"]
+
+        await send_long_message(context.bot, chat_id, reply, reply_to=update.message)
+
+        if pdf_path:
+            await context.bot.send_chat_action(chat_id=chat_id, action="upload_document")
+            with open(pdf_path, "rb") as f:
+                await context.bot.send_document(chat_id=chat_id, document=f,
+                    filename="carta_natal.pdf", caption="Ficha tecnica - Carta Natal")
+
+        for nombre_f, contenido, caption in extra_files:
+            try:
+                if caption == "voice":
+                    await context.bot.send_chat_action(chat_id=chat_id, action="record_voice")
+                    await context.bot.send_voice(chat_id=chat_id, voice=io.BytesIO(contenido))
+                elif caption == "video_link":
+                    lines = contenido.decode().split("\n")
+                    msg = "\n".join(lines[:3])
+                    await context.bot.send_message(chat_id=chat_id, text=msg)
+                elif caption.startswith("video|"):
+                    titulo_vid = caption.split("|", 1)[1]
+                    await context.bot.send_chat_action(chat_id=chat_id, action="upload_video")
+                    await context.bot.send_video(chat_id=chat_id,
+                        video=io.BytesIO(contenido), filename=nombre_f,
+                        caption=titulo_vid, supports_streaming=True)
+                else:
+                    await context.bot.send_chat_action(chat_id=chat_id, action="upload_document")
+                    await context.bot.send_document(chat_id=chat_id,
+                        document=io.BytesIO(contenido), filename=nombre_f, caption=caption)
+            except Exception as ve:
+                log.error(f"[{chat_id}] Error enviando {caption}: {ve}")
+
+        log.info(f"[{chat_id}] Bot: {reply[:80]}...")
+    except Exception as e:
+        log.error(f"Error: {e}")
+        await update.message.reply_text("Tardo demasiado o hubo un error, intentalo de nuevo.")
+
+
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    import asyncio, io, tempfile, subprocess, threading, queue, sys
+    chat_id = update.effective_chat.id
+    name    = update.effective_user.first_name or "Usuario"
+
+    await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+
+    try:
+        voice = update.message.voice or update.message.audio
+        tg_file = await context.bot.get_file(voice.file_id)
+        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
+            tmp_path = tmp.name
+        await tg_file.download_to_drive(tmp_path)
+
+        log.info(f"[{chat_id}] Transcribiendo audio de {name}...")
+        loop = asyncio.get_event_loop()
+        _bot_dir = os.path.dirname(os.path.abspath(__file__ + "/.."))
+        _transcribe_script = os.path.join(_bot_dir, "transcribe.py")
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable, _transcribe_script, tmp_path,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+            )
+            try:
+                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=60)
+                texto = stdout.decode().strip()
+            except asyncio.TimeoutError:
+                proc.kill()
+                texto = ""
+        except Exception as e:
+            log.error(f"Error transcripcion: {e}")
+            texto = ""
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+
+        if not texto or texto.startswith("ERROR:"):
+            await update.message.reply_text("No pude entender el audio, manda de nuevo.")
+            return
+
+        log.info(f"[{chat_id}] Transcripcion: {texto}")
+        await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+
+        q = queue.Queue()
+
+        def run_claude():
+            try:
+                q.put(("ok", ask_claude(chat_id, texto, user_name=name, allow_voice=True)))
+            except Exception as e:
+                q.put(("err", str(e)))
+
+        t = threading.Thread(target=run_claude, daemon=True)
+        t.start()
+
+        elapsed = 0
+        while t.is_alive() and elapsed < 120:
+            await asyncio.sleep(4)
+            elapsed += 4
+            if t.is_alive():
+                try:
+                    await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+                except Exception:
+                    pass
+
+        t.join(timeout=1)
+        if t.is_alive():
+            await update.message.reply_text("Tardo demasiado, intentalo de nuevo.")
+            return
+
+        status, payload = q.get(timeout=2)
+        if status == "err":
+            raise Exception(payload)
+
+        reply, pdf_path, extra_files = payload
+        save_message_full(chat_id, "user",      texto, db_path=DB_PATH)
+        save_message_full(chat_id, "assistant", reply, db_path=DB_PATH)
+
+        tiene_voz = any(cap == "voice" for _, _, cap in extra_files)
+        if not tiene_voz and reply and not es_respuesta_larga(reply):
+            ogg_path = texto_a_voz(reply)
+            if ogg_path:
+                with open(ogg_path, "rb") as f:
+                    extra_files.append(("respuesta.ogg", f.read(), "voice"))
+                os.unlink(ogg_path)
+                tiene_voz = True
+
+        if not tiene_voz:
+            await send_long_message(context.bot, chat_id, reply, reply_to=update.message)
+
+        if pdf_path:
+            await context.bot.send_chat_action(chat_id=chat_id, action="upload_document")
+            with open(pdf_path, "rb") as f:
+                await context.bot.send_document(chat_id=chat_id, document=f,
+                    filename="carta_natal.pdf", caption="Ficha tecnica - Carta Natal")
+
+        for nombre_f, contenido, caption in extra_files:
+            try:
+                if caption == "voice":
+                    await context.bot.send_chat_action(chat_id=chat_id, action="record_voice")
+                    await context.bot.send_voice(chat_id=chat_id, voice=io.BytesIO(contenido))
+                    log.info(f"[{chat_id}] Voz enviada OK: {len(contenido)} bytes")
+                elif caption == "video_link":
+                    lines = contenido.decode().split("\n")
+                    await context.bot.send_message(chat_id=chat_id, text="\n".join(lines[:3]))
+                else:
+                    await context.bot.send_chat_action(chat_id=chat_id, action="upload_document")
+                    await context.bot.send_document(chat_id=chat_id,
+                        document=io.BytesIO(contenido), filename=nombre_f, caption=caption)
+            except Exception as ve:
+                log.error(f"[{chat_id}] Error enviando {caption}: {ve}")
+
+    except Exception as e:
+        log.error(f"Error en voz: {e}")
+        await update.message.reply_text("No pude procesar el audio, intentalo de nuevo.")

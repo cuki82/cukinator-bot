@@ -11,19 +11,12 @@ WORKDIR /app
 RUN pip install --no-cache-dir numpy==1.26.4
 RUN pip install --no-cache-dir pyswisseph==2.10.3.2
 RUN pip install --no-cache-dir openai-whisper==20250625
-RUN pip install --no-cache-dir \
-    python-telegram-bot==22.7 \
-    anthropic==0.94.0 \
-    ddgs==9.13.0 \
-    fpdf2==2.8.7 \
-    geopy==2.4.1 \
-    pytz==2026.1.post1 \
-    requests==2.32.5 \
-    timezonefinder==8.2.2
+RUN pip install --no-cache-dir -r requirements.txt
 
 RUN mkdir -p /data
 
-COPY bot.py transcribe.py swiss_engine.py memory_store.py config_store.py reinsurance_kb.py agent_ops.py ./
+COPY bot.py bot_core.py transcribe.py ./
+COPY swiss_engine.py memory_store.py config_store.py reinsurance_kb.py agent_ops.py ./
+COPY handlers/ ./handlers/
 
 CMD ["python", "bot.py"]
-# rebuild 1776140727
