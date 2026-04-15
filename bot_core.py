@@ -1365,7 +1365,12 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
         and (is_owner or t["name"] not in OWNER_ONLY_TOOLS)
     ]
 
-    max_iterations = 6
+    # Límite dinámico según complejidad del mensaje
+    DEV_KEYWORDS = ["skill", "módulo", "modulo", "código", "codigo", "función", "funcion",
+                    "implementá", "implementa", "creá", "crea", "agregá", "agrega",
+                    "github", "deploy", "railway", "script", "handler", "integración"]
+    is_dev_task = any(k in user_text.lower() for k in DEV_KEYWORDS)
+    max_iterations = 12 if is_dev_task else 6
     iteration = 0
     last_text = ""
     vps_tools_used = 0
