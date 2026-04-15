@@ -23,6 +23,7 @@ from handlers.vps_handler      import vps_command
 from bot_core import (
     cmd_start, cmd_reset, cmd_voz, cmd_testvoice, cmd_cartas,
     handle_voz_callback, handle_menu_callback, handle_biblioteca_callback,
+    handle_confirm_callback,
     init_db, TELEGRAM_TOKEN, log
 )
 
@@ -48,10 +49,11 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("vps",       vps_command))
 
     # Callbacks inline
-    app.add_handler(CallbackQueryHandler(handle_biblioteca_callback, pattern="^lib:"))
-    app.add_handler(CallbackQueryHandler(handle_menu_callback,       pattern="^menu:"))
-    app.add_handler(CallbackQueryHandler(handle_voz_callback,        pattern="^voz:"))
-    app.add_handler(CallbackQueryHandler(handle_callback,            pattern="^astro:"))
+    app.add_handler(CallbackQueryHandler(handle_confirm_callback,      pattern="^confirm:"))
+    app.add_handler(CallbackQueryHandler(handle_biblioteca_callback,   pattern="^lib:"))
+    app.add_handler(CallbackQueryHandler(handle_menu_callback,         pattern="^menu:"))
+    app.add_handler(CallbackQueryHandler(handle_voz_callback,          pattern="^voz:"))
+    app.add_handler(CallbackQueryHandler(handle_callback,              pattern="^astro:"))
 
     # Mensajes
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
