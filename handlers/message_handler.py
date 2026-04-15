@@ -253,3 +253,110 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         log.error(f"Error en voz: {e}")
         await update.message.reply_text("No pude procesar el audio, intentalo de nuevo.")
+
+
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Maneja documentos enviados al bot (PDF, TXT, etc.)"""
+    import tempfile, os
+    chat_id = update.effective_chat.id
+    name = update.effective_user.first_name or "Usuario"
+    doc = update.message.document
+
+    await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+
+    # Solo PDF y texto por ahora
+    if doc.mime_type not in ("application/pdf", "text/plain"):
+        await update.message.reply_text(f"Por ahora solo proceso PDF y TXT. Recibí: {doc.mime_type}")
+        return
+
+    try:
+        # Descargar archivo
+        tg_file = await context.bot.get_file(doc.file_id)
+        suffix = ".pdf" if doc.mime_type == "application/pdf" else ".txt"
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+            tmp_path = tmp.name
+        await tg_file.download_to_drive(tmp_path)
+        log.info(f"[{chat_id}] Documento recibido: {doc.file_name} ({doc.file_size} bytes)")
+
+        # Extraer texto
+        texto = ""
+        if doc.mime_type == "application/pdf":
+            try:
+                import pypdf
+                with open(tmp_path, "rb") as f:
+                    reader = pypdf.PdfReader(f)
+                    for page in reader.pages:
+                        texto += page.extract_text() or ""
+            except ImportError:
+                try:
+                    import pdfminer.high_level as pdfminer
+                    texto = pdfminer.extract_text(tmp_path)
+                except ImportError:
+                    await update.message.reply_text("Necesito instalar pypdf para leer PDFs. Avisale al admin.")
+                    return
+        else:
+            with open(tmp_path, "r", errors="replace") as f:
+                texto = f.read()
+
+        os.unlink(tmp_path)
+
+        if not texto.strip():
+            await update.message.reply_text("No pude extraer texto del documento. ¿Es un PDF escaneado (imagen)?")
+            return
+
+        # Truncar si es muy largo
+        texto_truncado = texto[:12000]
+        truncado = len(texto) > 12000
+
+        # Pasar a Claude con contexto
+        caption = update.message.caption or ""
+        prompt = f"El usuario envió el documento '{doc.file_name}'"
+        if caption:
+            prompt += f" con el mensaje: '{caption}'"
+        prompt += f".\n\nContenido del documento ({len(texto)} caracteres"
+        if truncado:
+            prompt += ", truncado a 12000"
+        prompt += f"):\n\n{texto_truncado}"
+
+        await update.message.reply_text(f"Documento recibido: {doc.file_name} ({len(texto)} caracteres). Procesando...")
+        await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+
+        import queue, threading
+        from bot_core import ask_claude, save_message_full, send_long_message, DB_PATH
+
+        q = queue.Queue()
+        def run_claude():
+            try:
+                q.put(("ok", ask_claude(chat_id, prompt, user_name=name)))
+            except Exception as e:
+                q.put(("err", str(e)))
+
+        t = threading.Thread(target=run_claude, daemon=True)
+        t.start()
+
+        elapsed = 0
+        while t.is_alive() and elapsed < 180:
+            await asyncio.sleep(4)
+            elapsed += 4
+            try:
+                await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+            except Exception:
+                pass
+
+        t.join(timeout=1)
+        if t.is_alive():
+            await update.message.reply_text("Tardó demasiado procesando el documento.")
+            return
+
+        status, payload = q.get(timeout=2)
+        if status == "err":
+            raise Exception(payload)
+
+        reply, _, extra_files = payload
+        save_message_full(chat_id, "user", prompt[:500], db_path=DB_PATH)
+        save_message_full(chat_id, "assistant", reply, db_path=DB_PATH)
+        await send_long_message(context.bot, chat_id, reply, reply_to=update.message)
+
+    except Exception as e:
+        log.error(f"Error procesando documento: {e}")
+        await update.message.reply_text(f"Error procesando el documento: {e}")
