@@ -12,7 +12,7 @@ from telegram.ext import (
 )
 
 # Importar handlers
-from handlers.message_handler  import handle_message, handle_voice, handle_document
+from handlers.message_handler  import handle_message, handle_voice, handle_document, handle_photo
 from handlers.callback_handler import handle_callback, cmd_menu, cmd_biblioteca
 from handlers.gmail_handler    import gmail_command
 from handlers.calendar_handler import calendar_command
@@ -56,6 +56,7 @@ if __name__ == "__main__":
     # Mensajes
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     log.info("✅ Bot en línea.")
