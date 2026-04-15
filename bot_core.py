@@ -1365,9 +1365,10 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
         and (is_owner or t["name"] not in OWNER_ONLY_TOOLS)
     ]
 
-    max_iterations = 10
+    max_iterations = 6
     iteration = 0
     last_text = ""
+    vps_tools_used = 0
 
     while iteration < max_iterations:
         iteration += 1
@@ -1987,6 +1988,7 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
                                 result = f"Error (exit {res['exit_code']}): {err[:500]}"
                             log_change(instruction=cmd, action=f"vps_exec: {cmd[:60]}",
                                        result=result[:200], chat_id=chat_id, db_path=DB_PATH)
+                            vps_tools_used += 1
                         except Exception as e:
                             result = f"Error SSH: {e}"
                             log.error(f"vps_exec error: {e}")
@@ -2067,6 +2069,11 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
                     })
 
             messages.append({"role": "user", "content": tool_results})
+
+            # Si usó 2+ tools de VPS, forzar respuesta en la próxima iteración
+            if vps_tools_used >= 2:
+                messages.append({"role": "user", "content": "Respondé con el resultado de lo que ejecutaste. No uses más herramientas."})
+                vps_tools_used = 0
 
         else:
             # Respuesta final — extraer texto
