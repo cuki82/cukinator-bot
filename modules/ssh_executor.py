@@ -66,16 +66,18 @@ def execute_ssh_command(command: str, timeout: int = 30) -> dict:
         client = paramiko.SSHClient()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         
-        # Conectar
+        # Conectar (timeout de conexión fijo en 10s, separado del timeout de ejecución)
         logger.info(f"Conectando a {VPS_USER}@{VPS_HOST}:{VPS_PORT}")
         client.connect(
             hostname=VPS_HOST,
             port=VPS_PORT,
             username=VPS_USER,
             pkey=private_key,
-            timeout=timeout,
+            timeout=10,
             look_for_keys=False,
-            allow_agent=False
+            allow_agent=False,
+            banner_timeout=10,
+            auth_timeout=10,
         )
         
         # Ejecutar comando
