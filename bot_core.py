@@ -716,6 +716,20 @@ TOOLS = [
             "required": ["query"]
         }
     },
+        {
+            "name": "buscar_reserva",
+            "description": "Busca disponibilidad de reservas en restaurantes usando Meitre o TheFork. Usá cuando el usuario pida reservar, buscar mesa, o disponibilidad en un restaurante.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "restaurante": {"type": "string", "description": "Nombre del restaurante"},
+                    "fecha": {"type": "string", "description": "Fecha en formato YYYY-MM-DD"},
+                    "personas": {"type": "integer", "description": "Cantidad de comensales (default 2)"},
+                    "plataforma": {"type": "string", "description": "meitre o thefork (default: meitre)"}
+                },
+                "required": ["restaurante", "fecha"]
+            }
+        },
     {
         "name": "enviar_voz",
         "description": (
@@ -1553,6 +1567,20 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
                         except Exception as e:
                             result = f"Error buscando video: {e}"
                             log.error(f"buscar_video error: {e}")
+
+
+                elif block.name == "buscar_reserva":
+                    from modules.reservas import buscar_disponibilidad
+                    restaurante = block.input.get("restaurante", "")
+                    fecha = block.input.get("fecha", "")
+                    personas = block.input.get("personas", 2)
+                    plataforma = block.input.get("plataforma", "meitre")
+                    result = buscar_disponibilidad(restaurante, fecha, personas, plataforma)
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": json.dumps(result, ensure_ascii=False)
+                    })
 
                     elif block.name == "enviar_voz":
                         try:
