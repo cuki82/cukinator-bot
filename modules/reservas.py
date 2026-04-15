@@ -1,13 +1,13 @@
 """
-Módulo de búsqueda de disponibilidad en restaurantes.
-Conecta con el scraper en VPS para Meitre y TheFork.
+Módulo de búsqueda de reservas en restaurantes
+Conecta con el scraper corriendo en el VPS
 """
-
 import httpx
+import os
 from datetime import datetime, timedelta
 import re
 
-SCRAPER_URL = "http://31.97.151.119:3334"
+SCRAPER_URL = os.getenv("SCRAPER_RESERVAS_URL", "http://31.97.151.119:3334")
 
 async def buscar_disponibilidad(restaurante: str, fecha: str = None, personas: int = 2, plataforma: str = "auto") -> dict:
     """
@@ -15,24 +15,23 @@ async def buscar_disponibilidad(restaurante: str, fecha: str = None, personas: i
     
     Args:
         restaurante: Nombre del restaurante
-        fecha: Fecha en formato DD/MM/YYYY o texto natural (mañana, viernes, etc)
-        personas: Cantidad de personas
-        plataforma: 'meitre', 'thefork', o 'auto' (prueba ambas)
+        fecha: Fecha en formato DD/MM/YYYY o texto como "mañana", "sábado", etc.
+        personas: Cantidad de personas (default 2)
+        plataforma: "meitre", "thefork", o "auto" (prueba ambas)
     
     Returns:
         dict con disponibilidad y horarios
     """
-    
-    # Normalizar fecha
-    fecha_norm = normalizar_fecha(fecha)
+    # Parsear fecha si viene en texto
+    fecha_parsed = parse_fecha(fecha) if fecha else get_tomorrow()
     
     query = {
         "restaurante": restaurante,
-        "fecha": fecha_norm,
+        "fecha": fecha_parsed,
         "personas": personas
     }
     
-    resultados = []
+    results = []
     
     async with httpx.AsyncClient(timeout=60.0) as client:
         if plataforma in ("auto", "meitre"):
@@ -41,9 +40,9 @@ async def buscar_disponibilidad(restaurante: str, fecha: str = None, personas: i
                 if resp.status_code == 200:
                     data = resp.json()
                     if data.get("disponible") or data.get("horarios"):
-                        resultados.append(data)
+                        results.append(data)
             except Exception as e:
-                resultados.append({
+                results.append({
                     "disponible": False,
                     "mensaje": f"Error Meitre: {str(e)}",
                     "source": "meitre"
@@ -55,80 +54,38 @@ async def buscar_disponibilidad(restaurante: str, fecha: str = None, personas: i
                 if resp.status_code == 200:
                     data = resp.json()
                     if data.get("disponible") or data.get("horarios"):
-                        resultados.append(data)
+                        results.append(data)
             except Exception as e:
-                resultados.append({
+                results.append({
                     "disponible": False,
                     "mensaje": f"Error TheFork: {str(e)}",
                     "source": "thefork"
                 })
     
     # Consolidar resultados
-    if not resultados:
-        return {
-            "encontrado": False,
-            "mensaje": f"No pude consultar disponibilidad para {restaurante}",
-            "restaurante": restaurante,
-            "fecha": fecha_norm,
-            "personas": personas
-        }
-    
-    # Tomar el mejor resultado
-    for r in resultados:
-        if r.get("disponible") and r.get("horarios"):
-            return {
-                "encontrado": True,
-                "disponible": True,
-                "restaurante": restaurante,
-                "fecha": fecha_norm,
-                "personas": personas,
-                "horarios": r["horarios"],
-                "source": r["source"],
-                "mensaje": r.get("mensaje", "")
-            }
-    
-    # Si ninguno tiene disponibilidad
-    return {
-        "encontrado": True,
-        "disponible": False,
-        "restaurante": restaurante,
-        "fecha": fecha_norm,
-        "personas": personas,
-        "mensaje": resultados[0].get("mensaje", "Sin disponibilidad"),
-        "source": resultados[0].get("source", "")
-    }
+    return consolidar_resultados(results, restaurante, fecha_parsed, personas)
 
 
-def normalizar_fecha(fecha_input: str = None) -> str:
-    """Convierte fecha natural a DD/MM/YYYY"""
+def parse_fecha(texto: str) -> str:
+    """Convierte texto de fecha a DD/MM/YYYY"""
+    if not texto:
+        return get_tomorrow()
     
-    if not fecha_input:
-        # Default: mañana
-        tomorrow = datetime.now() + timedelta(days=1)
-        return tomorrow.strftime("%d/%m/%Y")
+    # Si ya está en formato DD/MM/YYYY
+    if re.match(r'\d{1,2}/\d{1,2}/\d{4}', texto):
+        return texto
     
-    fecha_lower = fecha_input.lower().strip()
-    today = datetime.now()
+    texto = texto.lower().strip()
+    hoy = datetime.now()
     
-    # Fecha ya en formato DD/MM/YYYY
-    if re.match(r'\d{1,2}/\d{1,2}/\d{4}', fecha_input):
-        return fecha_input
+    if texto in ("hoy", "today"):
+        return hoy.strftime("%d/%m/%Y")
     
-    # Fecha en formato DD/MM
-    match = re.match(r'(\d{1,2})/(\d{1,2})', fecha_input)
-    if match:
-        day, month = match.groups()
-        return f"{int(day):02d}/{int(month):02d}/{today.year}"
+    if texto in ("mañana", "manana", "tomorrow"):
+        return (hoy + timedelta(days=1)).strftime("%d/%m/%Y")
     
-    # Palabras clave
-    if fecha_lower in ("hoy", "today"):
-        return today.strftime("%d/%m/%Y")
-    
-    if fecha_lower in ("mañana", "manana", "tomorrow"):
-        return (today + timedelta(days=1)).strftime("%d/%m/%Y")
-    
-    if fecha_lower in ("pasado mañana", "pasado manana"):
-        return (today + timedelta(days=2)).strftime("%d/%m/%Y")
+    if texto in ("pasado mañana", "pasado manana"):
+        return (hoy + timedelta(days=2)).strftime("%d/%m/%Y")
     
     # Días de la semana
     dias = {
@@ -136,38 +93,80 @@ def normalizar_fecha(fecha_input: str = None) -> str:
         "jueves": 3, "viernes": 4, "sábado": 5, "sabado": 5, "domingo": 6
     }
     
-    for dia_nombre, dia_num in dias.items():
-        if dia_nombre in fecha_lower:
-            days_ahead = dia_num - today.weekday()
-            if days_ahead <= 0:  # Si ya pasó esta semana
+    for dia, num in dias.items():
+        if dia in texto:
+            days_ahead = num - hoy.weekday()
+            if days_ahead <= 0:
                 days_ahead += 7
-            target = today + timedelta(days=days_ahead)
+            target = hoy + timedelta(days=days_ahead)
             return target.strftime("%d/%m/%Y")
     
-    # Si no matchea nada, devolver mañana
-    return (today + timedelta(days=1)).strftime("%d/%m/%Y")
+    # Si hay números, intentar parsear
+    match = re.search(r'(\d{1,2})[/\-](\d{1,2})', texto)
+    if match:
+        dia, mes = match.groups()
+        año = hoy.year
+        if int(mes) < hoy.month:
+            año += 1
+        return f"{int(dia):02d}/{int(mes):02d}/{año}"
+    
+    # Default: mañana
+    return get_tomorrow()
 
 
-# Tool function para el bot
-async def tool_buscar_reserva(restaurante: str, fecha: str = None, personas: int = 2) -> str:
-    """
-    Tool function que llama el bot.
-    Devuelve string formateado para mostrar al usuario.
-    """
-    result = await buscar_disponibilidad(restaurante, fecha, personas)
+def get_tomorrow() -> str:
+    """Devuelve la fecha de mañana en DD/MM/YYYY"""
+    return (datetime.now() + timedelta(days=1)).strftime("%d/%m/%Y")
+
+
+def consolidar_resultados(results: list, restaurante: str, fecha: str, personas: int) -> dict:
+    """Consolida resultados de múltiples fuentes"""
+    if not results:
+        return {
+            "encontrado": False,
+            "mensaje": f"No pude conectar con el scraper de reservas",
+            "restaurante": restaurante,
+            "fecha": fecha,
+            "personas": personas
+        }
     
-    if not result.get("encontrado"):
-        return result["mensaje"]
+    # Buscar resultados con disponibilidad
+    disponibles = [r for r in results if r.get("disponible")]
     
-    if result.get("disponible") and result.get("horarios"):
-        horarios_str = ", ".join(result["horarios"][:8])
-        return (
-            f"**{result['restaurante']}** — {result['fecha']} ({result['personas']} personas)\n"
-            f"✅ Disponible en {result['source'].title()}\n"
-            f"Horarios: {horarios_str}"
-        )
-    else:
-        return (
-            f"**{result['restaurante']}** — {result['fecha']} ({result['personas']} personas)\n"
-            f"❌ {result['mensaje']}"
-        )
+    if disponibles:
+        # Tomar el que tenga más horarios
+        mejor = max(disponibles, key=lambda x: len(x.get("horarios", [])))
+        return {
+            "encontrado": True,
+            "disponible": True,
+            "restaurante": restaurante,
+            "fecha": fecha,
+            "personas": personas,
+            "horarios": mejor.get("horarios", []),
+            "fuente": mejor.get("source", "desconocida"),
+            "mensaje": f"Hay disponibilidad en {restaurante} para el {fecha}"
+        }
+    
+    # Si ninguno tiene disponibilidad
+    mensajes = [r.get("mensaje", "") for r in results if r.get("mensaje")]
+    return {
+        "encontrado": True,
+        "disponible": False,
+        "restaurante": restaurante,
+        "fecha": fecha,
+        "personas": personas,
+        "horarios": [],
+        "mensaje": mensajes[0] if mensajes else f"No hay disponibilidad en {restaurante} para el {fecha}",
+        "fuentes_consultadas": [r.get("source") for r in results]
+    }
+
+
+# Para testing
+if __name__ == "__main__":
+    import asyncio
+    
+    async def test():
+        result = await buscar_disponibilidad("Don Julio", "sábado", 4)
+        print(result)
+    
+    asyncio.run(test())
