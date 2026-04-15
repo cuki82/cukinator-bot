@@ -1364,7 +1364,12 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
         and (is_owner or t["name"] not in OWNER_ONLY_TOOLS)
     ]
 
-    while True:
+    max_iterations = 10
+    iteration = 0
+    last_text = ""
+
+    while iteration < max_iterations:
+        iteration += 1
         response = claude.messages.create(
             model="claude-opus-4-5",
             max_tokens=4096,
@@ -1372,6 +1377,7 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
             tools=tools_activos,
             messages=messages
         )
+        log.info(f"[{chat_id}] Claude iter {iteration} stop_reason={response.stop_reason}")
 
         if response.stop_reason == "tool_use":
             messages.append({"role": "assistant", "content": response.content})
@@ -2063,9 +2069,17 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
 
         else:
             for block in response.content:
-                if hasattr(block, "text"):
+                if hasattr(block, "text") and block.text.strip():
                     return block.text, pdf_path, extra_files
+            # Si hay texto parcial de iteraciones anteriores, usarlo
+            if last_text:
+                return last_text, pdf_path, extra_files
             return "No pude generar una respuesta.", pdf_path, extra_files
+
+    # Límite de iteraciones alcanzado — devolver último texto o error
+    if last_text:
+        return last_text, pdf_path, extra_files
+    return "Alcancé el límite de operaciones. Intentá con una instrucción más específica.", pdf_path, extra_files
 
 # ── Handlers Telegram ──────────────────────────────────────────────────────────
 async def send_long_message(bot, chat_id: int, text: str, reply_to=None, chunk_size: int = 3900):
