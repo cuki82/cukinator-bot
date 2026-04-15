@@ -123,24 +123,17 @@ async def buscar_disponibilidad(
     
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
-            if plataforma == "meitre":
+            # El scraper espera: restaurante (nombre), fecha (DD/MM/YYYY), personas
+            # Convertir fecha de YYYY-MM-DD a DD/MM/YYYY
+            fecha_ddmmyyyy = "/".join(reversed(fecha_parsed.split("-")))
+
+            if plataforma in ("meitre", "thefork"):
                 response = await client.post(
-                    f"{SCRAPER_URL}/meitre",
+                    f"{SCRAPER_URL}/meitre" if plataforma == "meitre" else f"{SCRAPER_URL}/thefork",
                     json={
-                        "restaurant_slug": info.get("slug"),
-                        "date": fecha_parsed,
-                        "party_size": personas,
-                        "preferred_time": hora_preferida
-                    }
-                )
-            elif plataforma == "thefork":
-                response = await client.post(
-                    f"{SCRAPER_URL}/thefork",
-                    json={
-                        "restaurant_id": info.get("id"),
-                        "date": fecha_parsed,
-                        "party_size": personas,
-                        "preferred_time": hora_preferida
+                        "restaurante": info.get("slug") or info["nombre"],
+                        "fecha": fecha_ddmmyyyy,
+                        "personas": personas,
                     }
                 )
             else:
