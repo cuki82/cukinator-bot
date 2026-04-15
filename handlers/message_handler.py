@@ -360,3 +360,89 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         log.error(f"Error procesando documento: {e}")
         await update.message.reply_text(f"Error procesando el documento: {e}")
+
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Maneja fotos enviadas al bot — las pasa a Claude con visión."""
+    import tempfile, os, base64
+    chat_id = update.effective_chat.id
+    name = update.effective_user.first_name or "Usuario"
+
+    await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+
+    try:
+        # Tomar la foto de mayor resolución
+        photo = update.message.photo[-1]
+        tg_file = await context.bot.get_file(photo.file_id)
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+            tmp_path = tmp.name
+        await tg_file.download_to_drive(tmp_path)
+
+        with open(tmp_path, "rb") as f:
+            img_b64 = base64.b64encode(f.read()).decode()
+        os.unlink(tmp_path)
+
+        caption = update.message.caption or "Analizá esta imagen y describí qué ves, especialmente colores, tipografías, logos y elementos de diseño."
+
+        log.info(f"[{chat_id}] Foto recibida de {name}")
+
+        # Llamar a Claude con visión directamente
+        import queue, threading
+        from bot_core import claude, get_system_prompt, save_message_full, send_long_message, DB_PATH
+
+        q = queue.Queue()
+
+        def run_claude():
+            try:
+                response = claude.messages.create(
+                    model="claude-opus-4-5",
+                    max_tokens=2048,
+                    system=get_system_prompt(user_name=name, chat_id=chat_id),
+                    messages=[{
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": "image/jpeg",
+                                    "data": img_b64
+                                }
+                            },
+                            {
+                                "type": "text",
+                                "text": caption
+                            }
+                        ]
+                    }]
+                )
+                text = response.content[0].text if response.content else "No pude analizar la imagen."
+                q.put(("ok", text))
+            except Exception as e:
+                q.put(("err", str(e)))
+
+        t = threading.Thread(target=run_claude, daemon=True)
+        t.start()
+
+        elapsed = 0
+        while t.is_alive() and elapsed < 60:
+            await asyncio.sleep(3)
+            elapsed += 3
+            try:
+                await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+            except Exception:
+                pass
+
+        t.join(timeout=1)
+        status, payload = q.get(timeout=2)
+
+        if status == "err":
+            raise Exception(payload)
+
+        save_message_full(chat_id, "user", f"[foto] {caption}", db_path=DB_PATH)
+        save_message_full(chat_id, "assistant", payload, db_path=DB_PATH)
+        await send_long_message(context.bot, chat_id, payload, reply_to=update.message)
+
+    except Exception as e:
+        log.error(f"Error procesando foto: {e}")
+        await update.message.reply_text(f"Error procesando la imagen: {e}")
