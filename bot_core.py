@@ -301,12 +301,12 @@ async def get_weather(location: str = "Buenos Aires") -> dict:
 
 # ── Skill: GitHub Push via API ─────────────────────────────────────────────────
 async def github_push(repo: str, path: str, content: str,
-                      message: str, branch: str = "main") -> dict:
-    """Crea o actualiza un archivo en GitHub via API. Triggerea Railway auto-deploy."""
+                      message: str, branch: str = "bot-changes") -> dict:
+    """Crea o actualiza un archivo en GitHub via API."""
     import base64 as _b64
     token = os.environ.get("GITHUB_TOKEN")
     if not token:
-        return {"error": "GITHUB_TOKEN no configurado. Agregalo como variable de entorno en Railway."}
+        return {"error": "GITHUB_TOKEN no configurado."}
     url = f"https://api.github.com/repos/{repo}/contents/{path}"
     headers = {
         "Authorization": f"Bearer {token}",
@@ -315,9 +315,12 @@ async def github_push(repo: str, path: str, content: str,
     }
     try:
         async with _httpx.AsyncClient(timeout=15) as client:
-            # Obtener SHA si el archivo ya existe
             existing = await client.get(url, headers=headers, params={"ref": branch})
             sha = existing.json().get("sha") if existing.status_code == 200 else None
+            # Si no existe en bot-changes, buscar en main para tomar el SHA base
+            if not sha and branch != "main":
+                existing_main = await client.get(url, headers=headers, params={"ref": "main"})
+                sha = existing_main.json().get("sha") if existing_main.status_code == 200 else None
             payload = {
                 "message": message,
                 "content": _b64.b64encode(content.encode()).decode(),
@@ -334,14 +337,47 @@ async def github_push(repo: str, path: str, content: str,
                 "path":   path,
                 "sha":    data["content"]["sha"][:7],
                 "url":    data["content"]["html_url"],
-                "deploy": "Railway auto-deploy triggered",
+                "branch": branch,
             }
         return {"error": resp.text[:200], "status": resp.status_code}
     except Exception as e:
         return {"error": str(e)}
 
 
-# ── Skill: Hora local (WorldTimeAPI) ──────────────────────────────────────────
+async def github_create_pr(repo: str, title: str, body: str,
+                           head: str = "bot-changes", base: str = "main") -> dict:
+    """Crea un Pull Request en GitHub para que el humano revise y apruebe."""
+    token = os.environ.get("GITHUB_TOKEN")
+    if not token:
+        return {"error": "GITHUB_TOKEN no configurado."}
+    url = f"https://api.github.com/repos/{repo}/pulls"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    try:
+        async with _httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(url, headers=headers, json={
+                "title": title,
+                "body": body,
+                "head": head,
+                "base": base,
+            })
+        if resp.status_code == 201:
+            data = resp.json()
+            return {
+                "ok":     True,
+                "pr_number": data["number"],
+                "url":    data["html_url"],
+                "title":  data["title"],
+            }
+        # Si ya existe un PR abierto
+        if resp.status_code == 422:
+            return {"ok": False, "error": "Ya hay un PR abierto para bot-changes. Mergealo o cerralo primero.", "status": 422}
+        return {"error": resp.text[:200], "status": resp.status_code}
+    except Exception as e:
+        return {"error": str(e)}
 _CITY_TZ = {
     "buenos aires":"America/Argentina/Buenos_Aires","cordoba":"America/Argentina/Cordoba",
     "córdoba":"America/Argentina/Cordoba","rosario":"America/Argentina/Cordoba",
@@ -671,22 +707,39 @@ TOOLS = [
     {
         "name": "github_push",
         "description": (
-            "Crea o actualiza un archivo en GitHub via API y trigerea Railway auto-deploy. "
-            "Usá para aplicar cambios de código al bot directamente desde Telegram. "
-            "El repo por default es cuki82/cukinator-bot. "
-            "SIEMPRE usá este tool cuando el usuario pida modificar código, agregar funciones, "
-            "actualizar archivos del proyecto, o aplicar cambios que requieran deploy."
+            "Crea o actualiza un archivo en GitHub en la rama bot-changes (NO en main). "
+            "Usá para proponer cambios de código: módulos nuevos, scripts, configs. "
+            "NUNCA usés para archivos core: bot.py, bot_core.py, handlers/, Dockerfile. "
+            "Después de pushear, usá github_pr para crear el Pull Request para revisión. "
+            "El repo por default es cuki82/cukinator-bot."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "repo":    {"type": "string", "description": "Repo owner/name. Default: cuki82/cukinator-bot"},
-                "path":    {"type": "string", "description": "Path del archivo en el repo (ej: bot.py, modules/weather.py)"},
+                "path":    {"type": "string", "description": "Path del archivo (ej: modules/nuevo_modulo.py)"},
                 "content": {"type": "string", "description": "Contenido COMPLETO del archivo"},
                 "message": {"type": "string", "description": "Mensaje del commit"},
-                "branch":  {"type": "string", "description": "Branch. Default: main"}
+                "branch":  {"type": "string", "description": "Branch. Default: bot-changes (NO usar main)"}
             },
             "required": ["path", "content", "message"]
+        }
+    },
+    {
+        "name": "github_pr",
+        "description": (
+            "Crea un Pull Request en GitHub desde bot-changes → main para que el usuario revise y apruebe. "
+            "Usá SIEMPRE después de pushear cambios con github_push. "
+            "El PR es la forma de proponer cambios al bot para que el humano los apruebe antes del deploy."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "repo":  {"type": "string", "description": "Repo. Default: cuki82/cukinator-bot"},
+                "title": {"type": "string", "description": "Título del PR"},
+                "body":  {"type": "string", "description": "Descripción de los cambios propuestos"}
+            },
+            "required": ["title", "body"]
         }
     },
     {
@@ -1184,9 +1237,9 @@ CAPACIDADES OPERATIVAS DISPONIBLES:
 
 PARA CAMBIOS DE CÓDIGO (bot.py, bot_core.py, handlers/, Dockerfile):
 - NUNCA uses github_push para modificar archivos core del bot. Están protegidos.
-- Si el usuario pide un cambio al bot mismo: describí qué habría que cambiar, mostrá el código propuesto, y decile que lo aplique desde la sesión de desarrollo Claude.
-- Solo podés pushear archivos NO core: módulos nuevos en modules/, scripts auxiliares, configs de servicios externos.
-- Para todo lo demás: explicá, mostrá el código, y dejá que el humano lo aplique.
+- Para módulos NUEVOS o scripts auxiliares: usá github_push (va a bot-changes automáticamente) y después github_pr para crear el Pull Request.
+- El flujo es: github_push → github_pr → el usuario aprueba el merge en GitHub → Railway deploya.
+- NUNCA pushees a main directamente. Siempre bot-changes → PR → merge.
 
 ANTE CREDENCIALES PEGADAS EN TELEGRAM:
 - Detectarlas automáticamente
@@ -1436,34 +1489,62 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
                             path    = block.input["path"]
                             content = block.input["content"]
                             message = block.input["message"]
-                            branch  = block.input.get("branch", "main")
+                            branch  = block.input.get("branch", "bot-changes")
 
-                            # Archivos core protegidos — solo editables desde sesión de desarrollo
+                            # Forzar bot-changes si intenta pushear a main
+                            if branch == "main":
+                                branch = "bot-changes"
+
+                            # Archivos core protegidos
                             PROTECTED = ("bot.py", "bot_core.py", "handlers/message_handler.py",
                                          "handlers/callback_handler.py", "handlers/vps_handler.py",
                                          "Dockerfile", "requirements.txt")
                             if path in PROTECTED:
-                                result = f"Bloqueado: `{path}` es un archivo core protegido. Los cambios estructurales al bot se hacen desde la sesión de desarrollo Claude, no desde Telegram."
+                                result = f"Bloqueado: `{path}` es un archivo core protegido. Los cambios al bot se hacen desde la sesión de desarrollo Claude."
                             else:
                                 data = _asyncio.run(github_push(repo, path, content, message, branch))
-                            if data.get("ok"):
-                                result = (f"GitHub push OK: {data['action']} {path} "
-                                          f"(sha:{data['sha']}) → {data.get('deploy','')}")
-                                log_change(
-                                    instruction=f"github_push {path}",
-                                    action=f"Archivo '{path}' {data['action']} en {repo}",
-                                    result=f"SHA:{data['sha']} — Railway auto-deploy triggered",
-                                    status="requires_deploy",
-                                    files_changed=[path],
-                                    chat_id=chat_id,
-                                    db_path=DB_PATH
-                                )
-                                log.info(f"[{chat_id}] GitHub push: {path} sha:{data['sha']}")
-                            else:
-                                result = f"Error en push: {data.get('error','desconocido')}"
+                                if data.get("ok"):
+                                    result = (f"Push OK en rama `bot-changes`: `{path}` ({data['action']}, sha:{data['sha']})\n"
+                                              f"Usá github_pr para crear el Pull Request y solicitar aprobación.")
+                                    log_change(
+                                        instruction=f"github_push {path}",
+                                        action=f"Archivo '{path}' {data['action']} en {repo} rama bot-changes",
+                                        result=f"SHA:{data['sha']} — pendiente de PR y merge",
+                                        status="requires_deploy",
+                                        files_changed=[path],
+                                        chat_id=chat_id,
+                                        db_path=DB_PATH
+                                    )
+                                else:
+                                    result = f"Error en push: {data.get('error','desconocido')}"
                         except Exception as e:
                             result = f"Error github_push: {e}"
                             log.error(f"github_push error: {e}")
+
+                    elif block.name == "github_pr":
+                        try:
+                            import asyncio as _asyncio
+                            repo  = block.input.get("repo", "cuki82/cukinator-bot")
+                            title = block.input["title"]
+                            body  = block.input["body"]
+                            data  = _asyncio.run(github_create_pr(repo, title, body))
+                            if data.get("ok"):
+                                result = (f"Pull Request creado:\n"
+                                          f"**#{data['pr_number']}** — {data['title']}\n"
+                                          f"URL: {data['url']}\n\n"
+                                          f"Revisá, aprobá y mergeá en GitHub para que Railway deploya.")
+                                log_change(
+                                    instruction=f"github_pr: {title}",
+                                    action=f"PR #{data['pr_number']} creado",
+                                    result=data['url'],
+                                    status="requires_deploy",
+                                    chat_id=chat_id, db_path=DB_PATH
+                                )
+                            else:
+                                result = f"Error creando PR: {data.get('error')}"
+                        except Exception as e:
+                            result = f"Error github_pr: {e}"
+                            log.error(f"github_pr error: {e}")
 
                     elif block.name == "get_time":
                         try:
