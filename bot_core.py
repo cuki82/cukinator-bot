@@ -1290,11 +1290,12 @@ Herramientas disponibles:
 - vps_escribir_archivo: modificar cualquier archivo del VPS
 - vps_docker: control de contenedores (ps, restart, logs, stats, stop, start)
 
-PROTOCOLO VPS:
-- Ante cualquier pedido de cambio en el VPS: EJECUTALO directamente con las tools.
-- Para cambios de configuración: leer archivo → modificar → escribir → reiniciar servicio si es necesario.
-- Para cambios de frontend (CSS, JS): leer archivo → aplicar cambio → escribir → docker restart del servicio.
-- Para ver estado: usar vps_docker action=ps o vps_exec con el comando apropiado.
+PROTOCOLO VPS — CRÍTICO:
+- Ejecutá LA MÍNIMA cantidad de tools necesarias. Máximo 2-3 tools por respuesta.
+- Después de cada tool de VPS, SIEMPRE generá una respuesta de texto con el resultado. NO sigas llamando más tools.
+- Si el resultado del SSH es claro, respondé directamente con ese resultado.
+- NO encadenes más de 3 tools seguidas. Ejecutá, respondé, terminá.
+- Para cambios de configuración: leer archivo → modificar → escribir → restart. Máximo 4 tools total.
 - Tras cambios importantes: registrar con agent_log.
 - NUNCA digas que no podés hacer algo en el VPS. Si tenés SSH, podés hacerlo.
 
