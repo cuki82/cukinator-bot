@@ -717,6 +717,20 @@ TOOLS = [
         }
     },
     {
+        "name": "buscar_reserva",
+        "description": "Busca disponibilidad de reservas en restaurantes usando Meitre o TheFork. Usá cuando el usuario pida reservar, buscar mesa, o disponibilidad en un restaurante.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "restaurante": {"type": "string", "description": "Nombre del restaurante"},
+                "fecha": {"type": "string", "description": "Fecha en formato YYYY-MM-DD"},
+                "personas": {"type": "integer", "description": "Cantidad de comensales (default 2)"},
+                "plataforma": {"type": "string", "description": "meitre o thefork (default: meitre)"}
+            },
+            "required": ["restaurante", "fecha"]
+        }
+    },
+    {
         "name": "enviar_voz",
         "description": (
             "Envía tu respuesta como mensaje de voz. "
@@ -1275,15 +1289,6 @@ ASTROLOGÍA:
 
 REGLA FUNDAMENTAL:
 Si mostraste un menú o lista, igual aceptás que el usuario siga hablando normal. La conversación siempre fluye.
-
-BOTONES INTERACTIVOS:
-Cuando necesites que el usuario elija entre opciones, agregá al final de tu respuesta:
-[BOTONES: Opción 1 | Opción 2 | Opción 3]
-Ejemplos:
-- Confirmación simple: [BOTONES: ✅ Sí, pushear | ❌ No, cancelar]
-- Múltiples opciones: [BOTONES: Instalar | Ver primero | Cancelar]
-- Con volver: [BOTONES: ✅ Continuar | ↩ Volver | ❌ Cancelar]
-Usá esto SIEMPRE que hagas una pregunta que requiera elegir. No esperes que el usuario escriba — dale botones.
 
 AUDIOS Y VOZ:
 - Si el usuario manda TEXTO → respondé SIEMPRE con texto. NUNCA uses enviar_voz salvo que en ese mismo mensaje de texto pida explícitamente una respuesta de voz/audio.
@@ -2082,6 +2087,20 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
                         "content": result
                     })
 
+            elif block.name == "buscar_reserva":
+                from modules.reservas import buscar_disponibilidad
+                result = buscar_disponibilidad(
+                    block.input["restaurante"],
+                    block.input["fecha"],
+                    block.input.get("personas", 2),
+                    block.input.get("plataforma", "meitre")
+                )
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": result
+                })
+
             messages.append({"role": "user", "content": tool_results})
 
             # Si usó 2+ tools de VPS, forzar respuesta en la próxima iteración
@@ -2119,38 +2138,6 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
     return "Alcancé el límite de operaciones. Intentá con una instrucción más específica.", pdf_path, extra_files
 
 # ── Handlers Telegram ──────────────────────────────────────────────────────────
-def _detect_confirmation_question(text: str):
-    """
-    Detecta botones explícitos en formato [BOTONES: op1 | op2 | op3]
-    o preguntas de confirmación implícitas Sí/No.
-    Retorna (tipo, opciones) o None.
-    """
-    import re
-
-    # Formato explícito: [BOTONES: Sí, pushear | No, cancelar | Ver primero]
-    match = re.search(r'\[BOTONES:\s*([^\]]+)\]', text, re.IGNORECASE)
-    if match:
-        opciones = [o.strip() for o in match.group(1).split('|') if o.strip()]
-        if opciones:
-            return ("custom", opciones)
-
-    # Preguntas implícitas Sí/No — últimas 3 líneas
-    last_lines = text.strip().split("\n")
-    tail = " ".join(last_lines[-3:]).lower().strip()
-    si_no_patterns = [
-        r"¿lo pusheo\??", r"¿lo aplico\??", r"¿procedo\??", r"¿lo hago\??",
-        r"¿confirmas?\??", r"¿confirmás?\??", r"¿continúo?\??", r"¿continuo\??",
-        r"¿lo envío?\??", r"¿lo envio\??", r"¿querés?\s+que", r"¿queres?\s+que",
-        r"¿arranco\??", r"¿lo ejecuto\??", r"¿lo instalo\??", r"¿lo creo\??",
-        r"¿lo guardo\??", r"¿lo reinicio\??",
-    ]
-    for pat in si_no_patterns:
-        if re.search(pat, tail):
-            return ("si_no", ["✅ Sí", "❌ No"])
-
-    return None
-
-
 async def send_long_message(bot, chat_id: int, text: str, reply_to=None, chunk_size: int = 3900):
     """Envía texto largo dividiéndolo en mensajes por secciones o por tamaño."""
     MAX_CHUNKS = 5  # Máximo 5 mensajes para evitar spam
@@ -2175,52 +2162,19 @@ async def send_long_message(bot, chat_id: int, text: str, reply_to=None, chunk_s
         chunks = chunks[:MAX_CHUNKS]
         chunks[-1] += f"\n\n_(mensaje truncado — {MAX_CHUNKS} partes máx)_"
 
-    # Detectar si el último chunk tiene botones
-    import re as _re_btn
-    last_chunk_clean = _re_btn.sub(r'\[BOTONES:[^\]]*\]', '', chunks[-1], flags=_re_btn.IGNORECASE).strip()
-    confirmation = _detect_confirmation_question(chunks[-1])
-
-    # Limpiar el bloque [BOTONES:] del texto visible
-    if confirmation and confirmation[0] == "custom":
-        chunks[-1] = last_chunk_clean
-
     for i, chunk in enumerate(chunks):
-        is_last = (i == len(chunks) - 1)
-        reply_markup = None
-
-        if is_last and confirmation:
-            tipo, opciones = confirmation
-            # Construir teclado — máx 2 botones por fila
-            filas = []
-            fila_actual = []
-            for j, op in enumerate(opciones):
-                # callback_data: confirm:0, confirm:1, confirm:2...
-                fila_actual.append(InlineKeyboardButton(op, callback_data=f"confirm:{j}:{op[:30]}"))
-                if len(fila_actual) == 2:
-                    filas.append(fila_actual)
-                    fila_actual = []
-            if fila_actual:
-                filas.append(fila_actual)
-            reply_markup = InlineKeyboardMarkup(filas)
-
         try:
             if reply_to and i == 0:
-                await reply_to.reply_text(chunk, reply_markup=reply_markup)
+                await reply_to.reply_text(chunk)
             else:
-                await bot.send_message(chat_id=chat_id, text=chunk, reply_markup=reply_markup)
+                await bot.send_message(chat_id=chat_id, text=chunk)
         except Exception:
-            import re as _re
-            plain = _re.sub(r'[*_`\[\]()~>#+\-=|{}.!]', '', chunk)
-            try:
-                if reply_to and i == 0:
-                    await reply_to.reply_text(plain, reply_markup=reply_markup)
-                else:
-                    await bot.send_message(chat_id=chat_id, text=plain, reply_markup=reply_markup)
-            except Exception:
-                if reply_to and i == 0:
-                    await reply_to.reply_text(plain)
-                else:
-                    await bot.send_message(chat_id=chat_id, text=plain)
+            import re
+            plain = re.sub(r'[*_`\[\]()~>#+\-=|{}.!]', '', chunk)
+            if reply_to and i == 0:
+                await reply_to.reply_text(plain)
+            else:
+                await bot.send_message(chat_id=chat_id, text=plain)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     import asyncio, io, threading, queue, time
@@ -2503,85 +2457,6 @@ async def cmd_voz(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Elegí la voz del bot:",
         reply_markup=InlineKeyboardMarkup(botones)
     )
-
-    )
-
-async def handle_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Maneja los botones de confirmación generados automáticamente."""
-    query = update.callback_query
-    await query.answer()
-    chat_id = query.message.chat_id
-    name = query.from_user.first_name or "Usuario"
-
-    # data format: confirm:INDEX:TEXTO
-    parts = query.data.split(":", 2)
-    opcion_texto = parts[2] if len(parts) > 2 else parts[1]
-
-    # Limpiar emojis de la opción para el mensaje
-    opcion_limpia = opcion_texto.strip()
-
-    # Editar el mensaje original para quitar los botones
-    try:
-        await query.message.edit_reply_markup(reply_markup=None)
-    except Exception:
-        pass
-
-    # Mostrar qué eligió el usuario
-    await query.message.reply_text(f"→ {opcion_limpia}")
-
-    # Pasar la elección a Claude como si fuera un mensaje normal
-    import threading, queue as _queue
-    q = _queue.Queue()
-
-    def run_claude():
-        try:
-            q.put(("ok", ask_claude(chat_id, opcion_limpia, user_name=name)))
-        except Exception as e:
-            q.put(("err", str(e)))
-
-    t = threading.Thread(target=run_claude, daemon=True)
-    t.start()
-
-    import asyncio
-    elapsed = 0
-    while t.is_alive() and elapsed < 180:
-        await asyncio.sleep(3)
-        elapsed += 3
-        try:
-            await context.bot.send_chat_action(chat_id=chat_id, action="typing")
-        except Exception:
-            pass
-
-    t.join(timeout=1)
-    if t.is_alive():
-        await query.message.reply_text("Tardó demasiado, intentalo de nuevo.")
-        return
-
-    status, payload = q.get(timeout=2)
-    if status == "err":
-        await query.message.reply_text(f"Error: {payload}")
-        return
-
-    reply, pdf_path, extra_files = payload
-    save_message_full(chat_id, "user", opcion_limpia, db_path=DB_PATH)
-    save_message_full(chat_id, "assistant", reply, db_path=DB_PATH)
-    await send_long_message(context.bot, chat_id, reply)
-
-    if pdf_path:
-        import io as _io
-        with open(pdf_path, "rb") as f:
-            await context.bot.send_document(chat_id=chat_id, document=f, filename="documento.pdf")
-
-    for nombre_f, contenido, caption in extra_files:
-        try:
-            import io as _io
-            if caption == "voice":
-                await context.bot.send_voice(chat_id=chat_id, voice=_io.BytesIO(contenido))
-            else:
-                await context.bot.send_document(chat_id=chat_id,
-                    document=_io.BytesIO(contenido), filename=nombre_f, caption=caption)
-        except Exception as ve:
-            log.error(f"Error enviando extra en confirm: {ve}")
 
 async def handle_voz_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
