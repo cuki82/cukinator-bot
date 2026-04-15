@@ -2068,13 +2068,28 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
             messages.append({"role": "user", "content": tool_results})
 
         else:
+            # Respuesta final — extraer texto
+            text_parts = []
             for block in response.content:
                 if hasattr(block, "text") and block.text.strip():
-                    return block.text, pdf_path, extra_files
-            # Si hay texto parcial de iteraciones anteriores, usarlo
+                    text_parts.append(block.text.strip())
+            if text_parts:
+                last_text = "\n".join(text_parts)
+                return last_text, pdf_path, extra_files
+            # Claude terminó sin texto — forzar una respuesta
+            messages.append({"role": "user", "content": "Resumí en 1-2 líneas qué hiciste y cuál fue el resultado."})
+            force_resp = claude.messages.create(
+                model="claude-opus-4-5",
+                max_tokens=512,
+                system=get_system_prompt(chat_id=chat_id),
+                messages=messages
+            )
+            for block in force_resp.content:
+                if hasattr(block, "text") and block.text.strip():
+                    return block.text.strip(), pdf_path, extra_files
             if last_text:
                 return last_text, pdf_path, extra_files
-            return "No pude generar una respuesta.", pdf_path, extra_files
+            return "Listo — ejecuté el comando en el VPS.", pdf_path, extra_files
 
     # Límite de iteraciones alcanzado — devolver último texto o error
     if last_text:
