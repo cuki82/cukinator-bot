@@ -17,7 +17,7 @@ RUN pip install --no-cache-dir "python-telegram-bot[job-queue]==22.7"
 RUN pip install --no-cache-dir anthropic==0.94.0
 RUN pip install --no-cache-dir fpdf2==2.8.7 geopy==2.4.1 timezonefinder==8.2.2
 RUN pip install --no-cache-dir requests==2.32.5 pytz==2026.1.post1 httpx==0.27.2
-RUN pip install --no-cache-dir gTTS==2.5.4 yt-dlp==2026.3.17 paramiko==3.5.0
+RUN pip install --no-cache-dir gTTS==2.5.4 yt-dlp==2026.3.17 paramiko==3.5.0 pypdf==4.3.1
 
 RUN mkdir -p /data
 
