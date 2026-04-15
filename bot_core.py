@@ -1437,9 +1437,12 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
                             message = block.input["message"]
                             branch  = block.input.get("branch", "main")
 
-                            # Guardia: bot.py solo se puede modificar desde sesión de desarrollo (no desde Telegram autónomamente)
-                            if path in ("bot.py",) and len(content) < 1000:
-                                result = f"Bloqueado: modificar {path} requiere revisión — el contenido parece incompleto ({len(content)} chars). Usá la sesión de desarrollo para cambios estructurales."
+                            # Archivos core protegidos — solo editables desde sesión de desarrollo
+                            PROTECTED = ("bot.py", "bot_core.py", "handlers/message_handler.py",
+                                         "handlers/callback_handler.py", "handlers/vps_handler.py",
+                                         "Dockerfile", "requirements.txt")
+                            if path in PROTECTED:
+                                result = f"Bloqueado: `{path}` es un archivo core protegido. Los cambios estructurales al bot se hacen desde la sesión de desarrollo Claude, no desde Telegram."
                             else:
                                 data = _asyncio.run(github_push(repo, path, content, message, branch))
                             if data.get("ok"):
