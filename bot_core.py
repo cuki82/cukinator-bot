@@ -753,6 +753,27 @@ TOOLS = [
         }
     },
     {
+        "name": "buscar_reserva",
+        "description": (
+            "Busca disponibilidad en restaurantes via scraper en el VPS. "
+            "Soporta restaurantes que usan Meitre, TheFork y otros sistemas. "
+            "Usá cuando el usuario pida buscar disponibilidad, hacer una reserva, "
+            "ver horarios disponibles en un restaurante, o consultar si hay lugar. "
+            "Ejemplos: 'buscame disponibilidad en Don Julio para mañana para 2', "
+            "'hay lugar en La Carnicería el viernes para 4 personas'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "restaurante": {"type": "string", "description": "Nombre del restaurante"},
+                "fecha":       {"type": "string", "description": "Fecha en texto (ej: 'mañana', 'viernes', '15/05/2026')"},
+                "personas":    {"type": "integer", "description": "Cantidad de personas (default 2)"},
+                "hora":        {"type": "string", "description": "Hora preferida (ej: '20:00', 'noche'). Opcional."}
+            },
+            "required": ["restaurante", "fecha"]
+        }
+    },
+    {
         "name": "buscar_video",
         "description": (
             "Busca y descarga un video de YouTube para enviarlo al usuario. "
@@ -1592,6 +1613,32 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
                             log.info(f"[{chat_id}] Clima: {result}")
                         except Exception as e:
                             result = f"Error obteniendo clima: {e}"
+
+                    elif block.name == "buscar_reserva":
+                        try:
+                            from modules.reservas import buscar_disponibilidad
+                            import asyncio as _asyncio
+                            restaurante = block.input["restaurante"]
+                            fecha       = block.input["fecha"]
+                            personas    = block.input.get("personas", 2)
+                            hora        = block.input.get("hora", "")
+                            log.info(f"[{chat_id}] Buscando reserva: {restaurante} {fecha} x{personas}")
+                            data = _asyncio.run(buscar_disponibilidad(restaurante, fecha, personas, hora))
+                            if data.get("disponible"):
+                                horarios = data.get("horarios", [])
+                                if horarios:
+                                    result = (f"Disponibilidad en {data.get('nombre', restaurante)} "
+                                              f"para {personas} personas el {fecha}:\n" +
+                                              "\n".join(f"  - {h}" for h in horarios[:10]))
+                                else:
+                                    result = f"Hay disponibilidad en {restaurante} para {fecha} x{personas}."
+                            elif data.get("error"):
+                                result = f"No pude consultar {restaurante}: {data['error']}"
+                            else:
+                                result = f"No hay disponibilidad en {restaurante} para {fecha} x{personas}."
+                        except Exception as e:
+                            result = f"Error consultando disponibilidad: {e}"
+                            log.error(f"buscar_reserva error: {e}")
 
                     elif block.name == "buscar_video":
                         try:
