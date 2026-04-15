@@ -8,7 +8,7 @@ import asyncio
 from datetime import datetime, timedelta
 import re
 
-SCRAPER_URL = "http://147.93.85.75:3334"
+SCRAPER_URL = "http://31.97.151.119:3334"
 
 # Restaurantes conocidos y sus plataformas
 RESTAURANTES_CONOCIDOS = {
