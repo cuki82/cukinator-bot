@@ -2112,6 +2112,8 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
 # ── Handlers Telegram ──────────────────────────────────────────────────────────
 async def send_long_message(bot, chat_id: int, text: str, reply_to=None, chunk_size: int = 3900):
     """Envía texto largo dividiéndolo en mensajes por secciones o por tamaño."""
+    MAX_CHUNKS = 5  # Máximo 5 mensajes para evitar spam
+
     if len(text) <= chunk_size:
         chunks = [text]
     else:
@@ -2119,7 +2121,6 @@ async def send_long_message(bot, chat_id: int, text: str, reply_to=None, chunk_s
         parts = []
         current = ""
         for line in text.split("\n"):
-            # Si agregar esta línea supera el límite, guardar chunk actual
             if len(current) + len(line) + 1 > chunk_size and current:
                 parts.append(current.strip())
                 current = ""
@@ -2127,6 +2128,11 @@ async def send_long_message(bot, chat_id: int, text: str, reply_to=None, chunk_s
         if current.strip():
             parts.append(current.strip())
         chunks = parts if parts else [text[:chunk_size]]
+
+    # Limitar chunks
+    if len(chunks) > MAX_CHUNKS:
+        chunks = chunks[:MAX_CHUNKS]
+        chunks[-1] += f"\n\n_(mensaje truncado — {MAX_CHUNKS} partes máx)_"
 
     for i, chunk in enumerate(chunks):
         try:
@@ -2147,8 +2153,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id  = update.effective_chat.id
     user_msg = update.message.text
     name     = update.effective_user.first_name or "Usuario"
+    msg_id   = update.message.message_id
 
-    # (sin buffer — procesar mensajes individualmente)
+    # Deduplicación — ignorar si ya procesamos este mensaje
+    if not hasattr(context.application, "_processed_ids"):
+        context.application._processed_ids = set()
+    if msg_id in context.application._processed_ids:
+        log.warning(f"[{chat_id}] Mensaje duplicado ignorado: {msg_id}")
+        return
+    context.application._processed_ids.add(msg_id)
+    # Limpiar cache si crece demasiado
+    if len(context.application._processed_ids) > 500:
+        context.application._processed_ids = set(list(context.application._processed_ids)[-200:])
 
     log.info(f"[{chat_id}] {name}: {user_msg[:80]}{'...' if len(user_msg)>80 else ''}")
 
