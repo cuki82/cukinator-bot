@@ -2512,8 +2512,6 @@ async def cmd_voz(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(botones)
     )
 
-    )
-
 async def handle_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Maneja los botones de confirmación generados automáticamente."""
     query = update.callback_query
