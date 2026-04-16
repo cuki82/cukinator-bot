@@ -590,7 +590,7 @@ def add_document(title: str, content: str, doc_type: str = "general",
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# MCP SERVER — Un solo servidor con todos los tools
+# MCP SERVER — SSE transport (funciona detrás de Railway CDN/Fastly)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 mcp = FastMCP("cukinator")
@@ -600,10 +600,10 @@ for src in [ops, github, memory, knowledge]:
     for name, tool in src._tool_manager._tools.items():
         mcp._tool_manager._tools[name] = tool
 
-# ASGI app — FastMCP expone en /mcp
-app = mcp.streamable_http_app()
+# SSE transport — más compatible con CDN/proxies que streamable-http
+app = mcp.sse_app()
 
-# Inyectar /health directamente en las rutas del app
+# Health check
 from starlette.routing import Route
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -611,8 +611,10 @@ from starlette.responses import JSONResponse
 async def health(request: Request):
     return JSONResponse({
         "status": "ok",
+        "transport": "sse",
         "tools": len(mcp._tool_manager._tools),
-        "mcp_endpoint": "/mcp",
+        "sse_endpoint": "/sse",
+        "messages_endpoint": "/messages",
         "tool_names": list(mcp._tool_manager._tools.keys())
     })
 
