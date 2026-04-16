@@ -57,6 +57,7 @@ class AgentTask:
     user_text: str
     chat_id: int
     user_name: str = ""
+    history: list = field(default_factory=list)  # historial de conversación
     context: dict = field(default_factory=dict)
     constraints: list = field(default_factory=list)
     task_id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
@@ -388,7 +389,7 @@ def run_operational_agent(task: AgentTask, available_tools: list,
     }
     op_tools = [t for t in available_tools if t["name"] in op_tool_names]
 
-    messages = [{"role": "user", "content": f"Tarea operativa: {task.user_text}"}]
+    messages = task.history + [{"role": "user", "content": f"Tarea operativa: {task.user_text}"}]
 
     # Adquirir lock
     task_id = task.task_id
@@ -426,7 +427,7 @@ No respondas al usuario directamente — tu output lo procesa el Orchestrator.""
 def run_research_agent(task: AgentTask, available_tools: list, tool_handler) -> AgentResult:
     research_tool_names = {"search_web", "ri_consultar", "ri_listar_documentos", "ri_stats"}
     tools = [t for t in available_tools if t["name"] in research_tool_names]
-    messages = [{"role": "user", "content": task.user_text}]
+    messages = task.history + [{"role": "user", "content": task.user_text}]
     result = _run_agent_loop(RESEARCH_SYSTEM, messages, tools, MODEL_SPECIALIZED, 6, tool_handler)
     result.agent = "research"
     return result
@@ -450,7 +451,7 @@ def run_personal_agent(task: AgentTask, available_tools: list, tool_handler) -> 
     personal_tool_names = {"memory_buscar", "memory_guardar_hecho", "memory_persona",
                            "memory_stats", "config_leer", "config_listar"}
     tools = [t for t in available_tools if t["name"] in personal_tool_names]
-    messages = [{"role": "user", "content": task.user_text}]
+    messages = task.history + [{"role": "user", "content": task.user_text}]
     result = _run_agent_loop(PERSONAL_SYSTEM, messages, tools, MODEL_SPECIALIZED, 4, tool_handler)
     result.agent = "personal"
     return result
@@ -474,7 +475,7 @@ def run_astrology_agent(task: AgentTask, available_tools: list, tool_handler) ->
     astro_tool_names = {"calcular_carta_natal", "astro_guardar_perfil", "astro_ver_perfil",
                         "astro_listar_perfiles", "astro_eliminar_perfil"}
     tools = [t for t in available_tools if t["name"] in astro_tool_names]
-    messages = [{"role": "user", "content": task.user_text}]
+    messages = task.history + [{"role": "user", "content": task.user_text}]
     result = _run_agent_loop(ASTROLOGY_SYSTEM, messages, tools, MODEL_SPECIALIZED, 6, tool_handler)
     result.agent = "astrology"
     return result
@@ -499,7 +500,7 @@ def run_reinsurance_agent(task: AgentTask, available_tools: list, tool_handler) 
     ri_tool_names = {"ri_consultar", "ri_listar_documentos", "ri_ingestar",
                      "ri_stats", "search_web"}
     tools = [t for t in available_tools if t["name"] in ri_tool_names]
-    messages = [{"role": "user", "content": task.user_text}]
+    messages = task.history + [{"role": "user", "content": task.user_text}]
     result = _run_agent_loop(REINSURANCE_SYSTEM, messages, tools, MODEL_SPECIALIZED, 6, tool_handler)
     result.agent = "reinsurance"
     return result
