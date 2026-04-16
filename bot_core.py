@@ -1539,9 +1539,13 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
             result_str = _dispatch_single_tool(block, chat_id, _pdf_ref, _extra_files_ref)
             return result_str, [], None
 
+        # Pasar historial al agente
+        _history = get_history_full(chat_id, limit=10, db_path=DB_PATH)
+
         agent_task = AgentTask(
             intent=intent, user_text=user_text,
-            chat_id=chat_id, user_name=user_name or ""
+            chat_id=chat_id, user_name=user_name or "",
+            history=_history
         )
         response, ef, pp = route_and_execute(agent_task, tools_activos, _tool_handler_for_agent)
 
