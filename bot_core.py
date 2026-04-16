@@ -1530,13 +1530,38 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
     ]
 
     # ── Delegación a agente especializado (non-conversational) ─────────────────
-    # Multi-agent routing — desactivado temporalmente (causa timeouts)
-    # El intent se loguea para diagnóstico pero todos van al flujo directo
-    # TODO: activar cuando optimicemos latencia de agentes
-    # if intent != "conversational" and is_owner:
-    #     ...
+    # ── Orchestrator v2 — pipeline completo ───────────────────────────────────
+    # Haiku decide (~200ms) → agente correcto ejecuta → consolida
+    if is_owner:
+        try:
+            from orchestrator_v2 import run_pipeline
 
-    # ── Flujo conversacional directo ───────────────────────────────────────────
+            history_for_orch = get_history_full(chat_id, limit=10, db_path=DB_PATH)
+            _pdf_ref = [None]
+            _extra_ref = []
+
+            def _tool_handler(block):
+                result = _dispatch_single_tool(block, chat_id, _pdf_ref, _extra_ref)
+                return result, [], None
+
+            response, ef, pp = run_pipeline(
+                user_text=user_text,
+                history=history_for_orch,
+                chat_id=chat_id,
+                user_name=user_name or "",
+                available_tools=tools_activos,
+                tool_handler=_tool_handler
+            )
+
+            if response:
+                save_message_full(chat_id, "user", user_text, db_path=DB_PATH)
+                save_message_full(chat_id, "assistant", response, db_path=DB_PATH)
+                return response, pp or _pdf_ref[0], ef + _extra_ref
+
+        except Exception as e:
+            log.error(f"Orchestrator v2 error: {e} — fallback a Claude directo")
+
+    # ── Flujo directo (fallback o non-owner) ───────────────────────────────────
     history = get_history_full(chat_id, limit=MAX_HISTORY, db_path=DB_PATH)
     history.append({"role": "user", "content": user_text})
     messages = history.copy()
