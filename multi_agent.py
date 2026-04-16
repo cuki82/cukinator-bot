@@ -106,25 +106,9 @@ Respondé SOLO con la categoría exacta. Sin explicación."""
 
 def classify_intent(user_text: str) -> str:
     """
-    Clasifica el mensaje usando claude-haiku (rápido, barato).
-    Fallback a keyword matching si falla.
+    Clasifica el mensaje usando SOLO keywords locales — sin llamada a API.
+    Rápido, sin latencia, sin costo.
     """
-    try:
-        resp = get_client().messages.create(
-            model=MODEL_ROUTER,
-            max_tokens=15,
-            system=ROUTER_SYSTEM,
-            messages=[{"role": "user", "content": user_text}]
-        )
-        result = resp.content[0].text.strip().lower().replace(" ", "_")
-        valid = {"conversational", "coding_task", "research_task", "personal_task",
-                 "astrology_task", "reinsurance_task", "mixed_task"}
-        if result in valid:
-            log.info(f"Intent router: '{user_text[:50]}' → {result}")
-            return result
-    except Exception as e:
-        log.warning(f"Intent router API falló ({e}), usando keywords")
-
     return _keyword_fallback(user_text)
 
 
