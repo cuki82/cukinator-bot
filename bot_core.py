@@ -1463,21 +1463,41 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
        archivos_extra = lista de (nombre, bytes, caption)
        allow_voice: si False, quita enviar_voz de los tools disponibles
     """
+    from orchestrator import classify_intent, Intent, repo_lock, operational_agent
+
+    # ── Intent classification ──────────────────────────────────────────────────
+    primary_intent, all_intents = classify_intent(user_text)
+    log.info(f"[{chat_id}] Intent: {primary_intent.value} | All: {[i.value for i in all_intents]}")
+
     history = get_history_full(chat_id, limit=MAX_HISTORY, db_path=DB_PATH)
     history.append({"role": "user", "content": user_text})
     messages = history.copy()
     pdf_path    = None
     extra_files = []
 
-    # Quitar enviar_voz si el usuario no pidió audio
     is_owner = (chat_id == OWNER_CHAT_ID)
+
+    # ── Repo safety check para tareas operativas ───────────────────────────────
+    if primary_intent == Intent.OPERATIONAL and is_owner:
+        DEFAULT_REPO = "cuki82/cukinator-bot"
+        if repo_lock.is_locked(DEFAULT_REPO):
+            lock_info = repo_lock.status(DEFAULT_REPO)
+            import time
+            elapsed = int(time.time() - lock_info["locked_at"])
+            return (
+                f"**Repo ocupado**\n\n"
+                f"Hay una tarea operativa en curso ({elapsed}s): {lock_info['task']}\n\n"
+                f"Esperá a que termine antes de iniciar otra operación sobre el repo.",
+                None, []
+            )
 
     # Tools restringidos al owner
     OWNER_ONLY_TOOLS = {
         "gmail_leer", "gmail_enviar", "gmail_ver_email", "gmail_descargar_adjunto",
         "calendar_ver", "calendar_crear",
-        "github_push", "config_guardar", "config_leer", "config_listar",
+        "github_push", "github_pr", "config_guardar", "config_leer", "config_listar",
         "agent_guardar_secret", "agent_registrar_skill", "agent_log",
+        "vps_exec", "vps_leer_archivo", "vps_escribir_archivo", "vps_docker",
     }
 
     tools_activos = [
@@ -1486,12 +1506,8 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
         and (is_owner or t["name"] not in OWNER_ONLY_TOOLS)
     ]
 
-    # Límite dinámico según complejidad del mensaje
-    DEV_KEYWORDS = ["skill", "módulo", "modulo", "código", "codigo", "función", "funcion",
-                    "implementá", "implementa", "creá", "crea", "agregá", "agrega",
-                    "github", "deploy", "railway", "script", "handler", "integración"]
-    is_dev_task = any(k in user_text.lower() for k in DEV_KEYWORDS)
-    max_iterations = 12 if is_dev_task else 6
+    # Límite dinámico según intención
+    max_iterations = 12 if primary_intent == Intent.OPERATIONAL else 6
     iteration = 0
     last_text = ""
     vps_tools_used = 0
@@ -1516,39 +1532,48 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
 
                     if block.name == "github_push":
                         try:
-                            import asyncio as _asyncio
+                            import asyncio as _asyncio, time as _time, uuid as _uuid
+                            from orchestrator import repo_lock, operational_agent
                             repo    = block.input.get("repo", "cuki82/cukinator-bot")
                             path    = block.input["path"]
                             content = block.input["content"]
                             message = block.input["message"]
                             branch  = block.input.get("branch", "bot-changes")
 
-                            # Forzar bot-changes si intenta pushear a main
+                            # Forzar bot-changes — NUNCA main
                             if branch == "main":
                                 branch = "bot-changes"
 
                             # Archivos core protegidos
-                            PROTECTED = ("bot.py", "bot_core.py", "handlers/message_handler.py",
-                                         "handlers/callback_handler.py", "handlers/vps_handler.py",
-                                         "Dockerfile", "requirements.txt")
-                            if path in PROTECTED:
-                                result = f"Bloqueado: `{path}` es un archivo core protegido. Los cambios al bot se hacen desde la sesión de desarrollo Claude."
+                            ok_file, reason = operational_agent.can_modify_file(path)
+                            if not ok_file:
+                                result = f"Bloqueado: {reason}"
+                            # Repo lock check
+                            elif repo_lock.is_locked(repo):
+                                info = repo_lock.status(repo)
+                                elapsed = int(_time.time() - info["locked_at"])
+                                result = f"Repo `{repo}` ocupado ({elapsed}s): {info['task']}. Esperá a que termine."
                             else:
-                                data = _asyncio.run(github_push(repo, path, content, message, branch))
-                                if data.get("ok"):
-                                    result = (f"Push OK en rama `bot-changes`: `{path}` ({data['action']}, sha:{data['sha']})\n"
-                                              f"Usá github_pr para crear el Pull Request y solicitar aprobación.")
-                                    log_change(
-                                        instruction=f"github_push {path}",
-                                        action=f"Archivo '{path}' {data['action']} en {repo} rama bot-changes",
-                                        result=f"SHA:{data['sha']} — pendiente de PR y merge",
-                                        status="requires_deploy",
-                                        files_changed=[path],
-                                        chat_id=chat_id,
-                                        db_path=DB_PATH
-                                    )
-                                else:
-                                    result = f"Error en push: {data.get('error','desconocido')}"
+                                # Adquirir lock
+                                task_id = str(_uuid.uuid4())[:8]
+                                repo_lock.acquire(repo, task_id, f"push {path}")
+                                try:
+                                    data = _asyncio.run(github_push(repo, path, content, message, branch))
+                                    if data.get("ok"):
+                                        result = (f"Push OK en `bot-changes`: `{path}` ({data['action']}, sha:{data['sha']})\n"
+                                                  f"Siguiente paso: `github_pr` para crear el Pull Request.")
+                                        log_change(
+                                            instruction=f"github_push {path}",
+                                            action=f"Archivo '{path}' {data['action']} en {repo} → bot-changes",
+                                            result=f"SHA:{data['sha']} — pendiente PR y merge",
+                                            status="requires_deploy",
+                                            files_changed=[path],
+                                            chat_id=chat_id, db_path=DB_PATH
+                                        )
+                                    else:
+                                        result = f"Error en push: {data.get('error','desconocido')}"
+                                finally:
+                                    repo_lock.release(repo, task_id)
                         except Exception as e:
                             result = f"Error github_push: {e}"
                             log.error(f"github_push error: {e}")
