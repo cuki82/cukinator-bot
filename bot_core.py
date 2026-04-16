@@ -1530,12 +1530,13 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
     ]
 
     # ── Delegación a agente especializado (non-conversational) ─────────────────
-    # ── Orchestrator v2 — pipeline completo ───────────────────────────────────
-    # Haiku decide (~200ms) → agente correcto ejecuta → consolida
-    if is_owner:
+    # ── Orchestrator v2 — solo para tareas no-conversacionales ───────────────
+    # Solo invocamos el Orchestrator cuando el intent es claramente operativo
+    # Para conversacional → Claude directo (sin overhead extra)
+    if is_owner and intent in ("coding_task", "astrology_task", "reinsurance_task",
+                               "research_task", "personal_task"):
         try:
             from orchestrator_v2 import run_pipeline
-
             history_for_orch = get_history_full(chat_id, limit=10, db_path=DB_PATH)
             _pdf_ref = [None]
             _extra_ref = []
@@ -1561,7 +1562,7 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
         except Exception as e:
             log.error(f"Orchestrator v2 error: {e} — fallback a Claude directo")
 
-    # ── Flujo directo (fallback o non-owner) ───────────────────────────────────
+    # ── Flujo directo — conversacional y fallback ──────────────────────────────
     history = get_history_full(chat_id, limit=MAX_HISTORY, db_path=DB_PATH)
     history.append({"role": "user", "content": user_text})
     messages = history.copy()
