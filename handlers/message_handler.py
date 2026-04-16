@@ -31,6 +31,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_msg = update.message.text
     name     = update.effective_user.first_name or "Usuario"
 
+    # (sin buffer)
+
     log.info(f"[{chat_id}] {name}: {user_msg[:80]}{'...' if len(user_msg)>80 else ''}")
 
     msg_lower = user_msg.strip().lower()
@@ -45,7 +47,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
-    # ── Claude directo ─────────────────────────────────────────────────────────
     try:
         q = queue.Queue()
 
@@ -69,9 +70,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if t.is_alive():
                 try:
                     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+                    # Hint visual si tarda más de 12s (probablemente está ejecutando SSH)
                     if elapsed == 12 and not vps_hint_sent:
                         vps_kw = any(w in user_msg.lower() for w in
-                            ["vps","docker","container","ssh","litellm","ollama","webui","servidor"])
+                            ["vps","docker","container","ssh","litellm","ollama","webui","servidor","open-web"])
                         if vps_kw:
                             await update.message.reply_text("Conectando al VPS...")
                             vps_hint_sent = True
