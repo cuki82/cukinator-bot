@@ -41,25 +41,9 @@ def _get_client():
 
 def classify(user_text: str) -> str:
     """
-    Clasifica el mensaje en 'conversational' o 'coding_task'.
-    Usa claude-haiku para ser rápido y barato.
-    Fallback a keywords si falla la API.
+    Clasifica usando SOLO keywords — sin llamada a API.
+    Sin latencia, sin costo.
     """
-    try:
-        resp = _get_client().messages.create(
-            model="claude-haiku-4-5",
-            max_tokens=10,
-            system=ROUTER_SYSTEM,
-            messages=[{"role": "user", "content": user_text}]
-        )
-        result = resp.content[0].text.strip().lower()
-        if result in ("conversational", "coding_task"):
-            log.info(f"Router: '{user_text[:60]}' → {result}")
-            return result
-    except Exception as e:
-        log.warning(f"Router API falló, usando keywords: {e}")
-
-    # Fallback: keyword matching
     return _keyword_classify(user_text)
 
 
