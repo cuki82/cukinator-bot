@@ -45,40 +45,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
-    # ── Intent routing ─────────────────────────────────────────────────────────
-    try:
-        from intent_router import classify
-        intent = classify(user_msg)
-    except Exception as e:
-        log.warning(f"Intent router falló: {e}, usando conversational")
-        intent = "conversational"
-
-    log.info(f"[{chat_id}] Intent: {intent}")
-
-    # ── Coding task → Agent Worker ─────────────────────────────────────────────
-    if intent == "coding_task" and chat_id == OWNER_CHAT_ID:
-        await update.message.reply_text("Tarea de código detectada. Enviando al Agent Worker...")
-        try:
-            from worker_client import send_coding_task, format_worker_result
-            result = await send_coding_task(user_msg, chat_id)
-            reply = format_worker_result(result)
-            save_message_full(chat_id, "user", user_msg, db_path=DB_PATH)
-            save_message_full(chat_id, "assistant", reply, db_path=DB_PATH)
-            await send_long_message(context.bot, chat_id, reply, reply_to=update.message)
-        except Exception as e:
-            log.error(f"Agent Worker error: {e}")
-            await update.message.reply_text(
-                f"**Agent Worker no disponible**\n\n"
-                f"Error: {e}\n\n"
-                f"Procesando como conversación normal..."
-            )
-            # Fallback a conversational
-            intent = "conversational"
-
-        if intent == "coding_task":
-            return
-
-    # ── Conversational → Claude directo ───────────────────────────────────────
+    # ── Claude directo ─────────────────────────────────────────────────────────
     try:
         q = queue.Queue()
 
