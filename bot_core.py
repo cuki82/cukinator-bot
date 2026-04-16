@@ -1224,27 +1224,6 @@ TOOLS = [
             },
             "required": ["action"]
         }
-    },
-    {
-        "name": "mcp_tool",
-        "description": (
-            "Llama a un tool del MCP Server (capa de acceso estándar a sistemas). "
-            "Usá para operaciones avanzadas de VPS, GitHub, memoria y knowledge base "
-            "que no están cubiertas por los tools directos. "
-            "Tools disponibles en MCP: vps_status, vps_exec, docker_ps, docker_logs, "
-            "docker_restart, service_health, read_file_vps, write_file_vps, "
-            "repo_status, read_file_github, push_file, create_pr, list_prs, "
-            "search_memory, save_fact, get_recent_history, memory_stats, "
-            "search_knowledge, list_documents, kb_stats, add_document."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "tool_name": {"type": "string", "description": "Nombre del tool MCP a ejecutar"},
-                "args":      {"type": "object", "description": "Argumentos del tool como objeto JSON"}
-            },
-            "required": ["tool_name"]
-        }
     }
 ]
 
@@ -1431,12 +1410,6 @@ Herramientas disponibles:
 - vps_leer_archivo: leer cualquier archivo del VPS
 - vps_escribir_archivo: modificar cualquier archivo del VPS
 - vps_docker: control de contenedores (ps, restart, logs, stats, stop, start)
-- mcp_tool: acceso al MCP Server con 21 tools avanzados (vps_status, docker_ps, repo_status, search_memory, search_knowledge, etc.)
-
-MCP LAYER:
-Usá mcp_tool cuando necesites operaciones avanzadas no cubiertas por los tools directos.
-Ejemplo: mcp_tool(tool_name="vps_status") para estado completo del VPS.
-Ejemplo: mcp_tool(tool_name="search_knowledge", args={"query": "quota share"}) para KB.
 
 PROTOCOLO VPS — CRÍTICO:
 - Ejecutá LA MÍNIMA cantidad de tools necesarias. Máximo 2-3 tools por respuesta.
@@ -1486,41 +1459,25 @@ def get_system_prompt(user_name: str = None, chat_id: int = None) -> str:
     return prompt
 
 def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice: bool = False) -> tuple:
-    """Retorna (respuesta_texto, pdf_path_o_None, archivos_extra).
-
-    Pipeline multi-agente:
-      1. Intent Router clasifica el mensaje (claude-haiku, rápido)
-      2. non-conversational → delega al agente especializado (multi_agent.py)
-      3. conversational → responde directo con Claude + todos los tools
-      4. El Orchestrator consolida la respuesta final
+    """Retorna (respuesta_texto, pdf_path_o_None, archivos_extra)
+       archivos_extra = lista de (nombre, bytes, caption)
+       allow_voice: si False, quita enviar_voz de los tools disponibles
     """
-    from multi_agent import classify_intent, route_and_execute, AgentTask, REPO_LOCK, DEFAULT_REPO
+    history = get_history_full(chat_id, limit=MAX_HISTORY, db_path=DB_PATH)
+    history.append({"role": "user", "content": user_text})
+    messages = history.copy()
+    pdf_path    = None
+    extra_files = []
 
+    # Quitar enviar_voz si el usuario no pidió audio
     is_owner = (chat_id == OWNER_CHAT_ID)
 
-    # ── Intent classification ──────────────────────────────────────────────────
-    intent = classify_intent(user_text)
-    log.info(f"[{chat_id}] Intent: {intent}")
-
-    # ── Repo lock check ────────────────────────────────────────────────────────
-    if intent == "coding_task" and is_owner and REPO_LOCK.is_locked(DEFAULT_REPO):
-        import time as _t
-        info = REPO_LOCK.status(DEFAULT_REPO)
-        elapsed = int(_t.time() - info["at"])
-        return (
-            f"**Repo ocupado**\n\n"
-            f"Tarea en curso ({elapsed}s): {info['desc']}\n\n"
-            f"Esperá a que termine antes de iniciar otra operación.",
-            None, []
-        )
-
-    # ── Tools disponibles ──────────────────────────────────────────────────────
+    # Tools restringidos al owner
     OWNER_ONLY_TOOLS = {
         "gmail_leer", "gmail_enviar", "gmail_ver_email", "gmail_descargar_adjunto",
         "calendar_ver", "calendar_crear",
-        "github_push", "github_pr", "config_guardar", "config_leer", "config_listar",
+        "github_push", "config_guardar", "config_leer", "config_listar",
         "agent_guardar_secret", "agent_registrar_skill", "agent_log",
-        "vps_exec", "vps_leer_archivo", "vps_escribir_archivo", "vps_docker",
     }
 
     tools_activos = [
@@ -1529,47 +1486,12 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
         and (is_owner or t["name"] not in OWNER_ONLY_TOOLS)
     ]
 
-    # ── Delegación a agente especializado (non-conversational) ─────────────────
-    # ── Orchestrator v2 — solo para tareas no-conversacionales ───────────────
-    # Solo invocamos el Orchestrator cuando el intent es claramente operativo
-    # Para conversacional → Claude directo (sin overhead extra)
-    if is_owner and intent in ("coding_task", "astrology_task", "reinsurance_task",
-                               "research_task", "personal_task"):
-        try:
-            from orchestrator_v2 import run_pipeline
-            history_for_orch = get_history_full(chat_id, limit=10, db_path=DB_PATH)
-            _pdf_ref = [None]
-            _extra_ref = []
-
-            def _tool_handler(block):
-                result = _dispatch_single_tool(block, chat_id, _pdf_ref, _extra_ref)
-                return result, [], None
-
-            response, ef, pp = run_pipeline(
-                user_text=user_text,
-                history=history_for_orch,
-                chat_id=chat_id,
-                user_name=user_name or "",
-                available_tools=tools_activos,
-                tool_handler=_tool_handler
-            )
-
-            if response:
-                save_message_full(chat_id, "user", user_text, db_path=DB_PATH)
-                save_message_full(chat_id, "assistant", response, db_path=DB_PATH)
-                return response, pp or _pdf_ref[0], ef + _extra_ref
-
-        except Exception as e:
-            log.error(f"Orchestrator v2 error: {e} — fallback a Claude directo")
-
-    # ── Flujo directo — conversacional y fallback ──────────────────────────────
-    history = get_history_full(chat_id, limit=MAX_HISTORY, db_path=DB_PATH)
-    history.append({"role": "user", "content": user_text})
-    messages = history.copy()
-    pdf_path    = None
-    extra_files = []
-
-    max_iterations = 12 if intent == "coding_task" else 6
+    # Límite dinámico según complejidad del mensaje
+    DEV_KEYWORDS = ["skill", "módulo", "modulo", "código", "codigo", "función", "funcion",
+                    "implementá", "implementa", "creá", "crea", "agregá", "agrega",
+                    "github", "deploy", "railway", "script", "handler", "integración"]
+    is_dev_task = any(k in user_text.lower() for k in DEV_KEYWORDS)
+    max_iterations = 12 if is_dev_task else 6
     iteration = 0
     last_text = ""
     vps_tools_used = 0
@@ -1594,48 +1516,39 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
 
                     if block.name == "github_push":
                         try:
-                            import asyncio as _asyncio, time as _time, uuid as _uuid
-                            from orchestrator import repo_lock, operational_agent
+                            import asyncio as _asyncio
                             repo    = block.input.get("repo", "cuki82/cukinator-bot")
                             path    = block.input["path"]
                             content = block.input["content"]
                             message = block.input["message"]
                             branch  = block.input.get("branch", "bot-changes")
 
-                            # Forzar bot-changes — NUNCA main
+                            # Forzar bot-changes si intenta pushear a main
                             if branch == "main":
                                 branch = "bot-changes"
 
                             # Archivos core protegidos
-                            ok_file, reason = operational_agent.can_modify_file(path)
-                            if not ok_file:
-                                result = f"Bloqueado: {reason}"
-                            # Repo lock check
-                            elif repo_lock.is_locked(repo):
-                                info = repo_lock.status(repo)
-                                elapsed = int(_time.time() - info["locked_at"])
-                                result = f"Repo `{repo}` ocupado ({elapsed}s): {info['task']}. Esperá a que termine."
+                            PROTECTED = ("bot.py", "bot_core.py", "handlers/message_handler.py",
+                                         "handlers/callback_handler.py", "handlers/vps_handler.py",
+                                         "Dockerfile", "requirements.txt")
+                            if path in PROTECTED:
+                                result = f"Bloqueado: `{path}` es un archivo core protegido. Los cambios al bot se hacen desde la sesión de desarrollo Claude."
                             else:
-                                # Adquirir lock
-                                task_id = str(_uuid.uuid4())[:8]
-                                repo_lock.acquire(repo, task_id, f"push {path}")
-                                try:
-                                    data = _asyncio.run(github_push(repo, path, content, message, branch))
-                                    if data.get("ok"):
-                                        result = (f"Push OK en `bot-changes`: `{path}` ({data['action']}, sha:{data['sha']})\n"
-                                                  f"Siguiente paso: `github_pr` para crear el Pull Request.")
-                                        log_change(
-                                            instruction=f"github_push {path}",
-                                            action=f"Archivo '{path}' {data['action']} en {repo} → bot-changes",
-                                            result=f"SHA:{data['sha']} — pendiente PR y merge",
-                                            status="requires_deploy",
-                                            files_changed=[path],
-                                            chat_id=chat_id, db_path=DB_PATH
-                                        )
-                                    else:
-                                        result = f"Error en push: {data.get('error','desconocido')}"
-                                finally:
-                                    repo_lock.release(repo, task_id)
+                                data = _asyncio.run(github_push(repo, path, content, message, branch))
+                                if data.get("ok"):
+                                    result = (f"Push OK en rama `bot-changes`: `{path}` ({data['action']}, sha:{data['sha']})\n"
+                                              f"Usá github_pr para crear el Pull Request y solicitar aprobación.")
+                                    log_change(
+                                        instruction=f"github_push {path}",
+                                        action=f"Archivo '{path}' {data['action']} en {repo} rama bot-changes",
+                                        result=f"SHA:{data['sha']} — pendiente de PR y merge",
+                                        status="requires_deploy",
+                                        files_changed=[path],
+                                        chat_id=chat_id,
+                                        db_path=DB_PATH
+                                    )
+                                else:
+                                    result = f"Error en push: {data.get('error','desconocido')}"
                         except Exception as e:
                             result = f"Error github_push: {e}"
                             log.error(f"github_push error: {e}")
@@ -2375,324 +2288,6 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
     return "Alcancé el límite de operaciones. Intentá con una instrucción más específica.", pdf_path, extra_files
 
 # ── Handlers Telegram ──────────────────────────────────────────────────────────
-
-def _dispatch_single_tool(block, chat_id: int, pdf_ref: list, extra_files_ref: list) -> str:
-    """
-    Ejecuta un tool individual y devuelve el resultado como string.
-    Usado por los agentes especializados del sistema multi-agente.
-    Acumula pdf_path en pdf_ref[0] y extra_files en extra_files_ref.
-    """
-    import asyncio as _asyncio
-
-    name = block.name
-    inp  = block.input
-
-    # ── GitHub ────────────────────────────────────────────────────────────────
-    if name == "github_push":
-        from multi_agent import REPO_LOCK, DEFAULT_REPO, PROTECTED_FILES
-        import time as _t, uuid as _uuid
-        repo    = inp.get("repo", DEFAULT_REPO)
-        path    = inp["path"]
-        content = inp["content"]
-        message = inp["message"]
-        branch  = inp.get("branch", "bot-changes")
-        if branch == "main":
-            branch = "bot-changes"
-        if path in PROTECTED_FILES:
-            return f"Bloqueado: `{path}` es un archivo core protegido."
-        if REPO_LOCK.is_locked(repo):
-            info = REPO_LOCK.status(repo)
-            return f"Repo ocupado: {info['desc']}"
-        task_id = str(_uuid.uuid4())[:8]
-        REPO_LOCK.acquire(repo, task_id, f"push {path}")
-        try:
-            data = _asyncio.run(github_push(repo, path, content, message, branch))
-            if data.get("ok"):
-                return f"Push OK en `bot-changes`: `{path}` sha:{data['sha']} — creá PR con github_pr."
-            return f"Error push: {data.get('error')}"
-        finally:
-            REPO_LOCK.release(repo, task_id)
-
-    elif name == "github_pr":
-        repo  = inp.get("repo", DEFAULT_REPO)
-        title = inp["title"]
-        body  = inp["body"]
-        data  = _asyncio.run(github_create_pr(repo, title, body))
-        if data.get("ok"):
-            return f"PR #{data['pr_number']} creado: {data['url']}"
-        return f"Error PR: {data.get('error')}"
-
-    # ── VPS ───────────────────────────────────────────────────────────────────
-    elif name == "vps_exec":
-        from modules.ssh_executor import execute_ssh_command
-        cmd = inp["command"]
-        timeout = inp.get("timeout", 30)
-        res = execute_ssh_command(cmd, timeout=timeout)
-        if res["success"]:
-            return res["stdout"].strip()[:3000] or "(sin output)"
-        return f"Error (exit {res['exit_code']}): {res['error'] or res['stderr']}"
-
-    elif name == "vps_leer_archivo":
-        from modules.ssh_executor import read_file_sftp
-        res = read_file_sftp(inp["path"])
-        if res["success"]:
-            return res["content"][:4000]
-        return f"Error: {res['error']}"
-
-    elif name == "vps_escribir_archivo":
-        from modules.ssh_executor import write_file_sftp
-        res = write_file_sftp(inp["path"], inp["content"])
-        if res["success"]:
-            return f"Archivo escrito: {inp['path']} ({res['bytes']} bytes)"
-        return f"Error: {res['error']}"
-
-    elif name == "vps_docker":
-        from modules.ssh_executor import execute_ssh_command
-        action    = inp["action"]
-        container = inp.get("container", "")
-        tail      = inp.get("tail", 50)
-        cmd_map = {
-            "ps":      "docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'",
-            "stats":   "docker stats --no-stream --format 'table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}'",
-            "restart": f"docker restart {container}",
-            "stop":    f"docker stop {container}",
-            "start":   f"docker start {container}",
-            "logs":    f"docker logs {container} --tail {tail}",
-            "inspect": f"docker inspect {container}",
-        }
-        cmd = cmd_map.get(action)
-        if not cmd:
-            return f"Acción no reconocida: {action}"
-        res = execute_ssh_command(cmd, timeout=30)
-        return (res["stdout"].strip() or "(sin output)")[:3000] if res["success"] else f"Error: {res['error'] or res['stderr']}"
-
-    # ── Web / tiempo / clima ──────────────────────────────────────────────────
-    elif name == "search_web":
-        return search_web(inp["query"])
-
-    elif name == "get_time":
-        raw = inp.get("timezone", "America/Argentina/Buenos_Aires")
-        tz  = city_to_timezone(raw) if "/" not in raw else raw
-        data = _asyncio.run(get_time(tz or "America/Argentina/Buenos_Aires"))
-        if "error" in data:
-            return data["error"]
-        return f"{data['timezone']}: {data['hora']} ({data['fecha']}) {data['utc_offset']}"
-
-    elif name == "get_weather":
-        data = _asyncio.run(get_weather(inp.get("location", "Buenos Aires")))
-        if "error" in data:
-            return f"Error clima: {data['error']}"
-        return (f"{data['ubicacion']}, {data['pais']}: {data['temperatura']}°C, "
-                f"{data['condicion']}, humedad {data['humedad']}%, viento {data['viento_kmh']} km/h")
-
-    # ── Memoria ───────────────────────────────────────────────────────────────
-    elif name == "memory_buscar":
-        res = search_memory(chat_id, inp["query"], db_path=DB_PATH)
-        facts = res.get("memory_facts", [])
-        msgs  = res.get("messages", [])
-        lines = []
-        if facts:
-            lines.append(f"Hechos ({len(facts)}):")
-            for f in facts:
-                lines.append(f"  [{f.get('type','')}] {f.get('title','')} — {f.get('content','')[:200]}")
-        if msgs:
-            lines.append(f"Mensajes ({len(msgs)}):")
-            for m in msgs:
-                lines.append(f"  {m.get('role','')}: {m.get('content','')[:200]}")
-        return "\n".join(lines) if lines else "No encontré nada."
-
-    elif name == "memory_guardar_hecho":
-        fid = save_memory_fact(chat_id, inp["content"],
-                               fact_type=inp.get("tipo", "fact"),
-                               title=inp.get("titulo", ""),
-                               tags=inp.get("tags", []), db_path=DB_PATH)
-        return f"Hecho guardado (id={fid})."
-
-    elif name == "memory_stats":
-        stats = get_memory_stats(chat_id, DB_PATH)
-        return (f"Memoria: {stats['messages']} mensajes, {stats['sessions']} sesiones, "
-                f"{stats['memory_facts']} hechos, {stats['persons']} personas.")
-
-    # ── Astrología ────────────────────────────────────────────────────────────
-    elif name == "calcular_carta_natal":
-        import time as _t, gc
-        carta = calcular_carta(inp["fecha"], inp["hora"], inp["lugar"])
-        _t.sleep(0.3)
-        if inp.get("ficha_tecnica"):
-            result = formatear_ficha_tecnica(carta)
-        else:
-            result = formatear_carta(carta)
-        if inp.get("generar_pdf"):
-            pp = generar_pdf(carta, ficha_tecnica=inp.get("ficha_tecnica", False))
-            pdf_ref[0] = pp
-            result += "\n\n[PDF generado]"
-        gc.collect()
-        return result
-
-    elif name == "astro_guardar_perfil":
-        nombre = inp["nombre"]
-        carta  = calcular_carta(inp["fecha"], inp["hora"], inp["lugar"])
-        return astro_guardar(chat_id, nombre, inp["fecha"], inp["hora"], inp["lugar"], carta)
-
-    elif name == "astro_ver_perfil":
-        datos = astro_recuperar(chat_id, inp["nombre"])
-        if not datos:
-            return f"No tengo carta de {inp['nombre']}."
-        carta = calcular_carta(datos["fecha"], datos["hora"], datos["lugar"])
-        return f"Carta de {inp['nombre'].title()}:\n\n" + formatear_carta(carta)
-
-    elif name == "astro_listar_perfiles":
-        perfiles = astro_listar(chat_id)
-        if not perfiles:
-            return "No hay perfiles guardados."
-        return "\n".join([f"- {p['nombre'].title()}: {p['fecha']} - {p['lugar']}" for p in perfiles])
-
-    elif name == "astro_eliminar_perfil":
-        return astro_eliminar(chat_id, inp["nombre"])
-
-    # ── Reaseguros ────────────────────────────────────────────────────────────
-    elif name == "ri_consultar":
-        res = search_knowledge(inp.get("query", ""), db_path=DB_PATH)
-        parts = []
-        if res["concepts"]:
-            parts.append(f"CONCEPTOS:")
-            for c in res["concepts"][:4]:
-                parts.append(f"  {c['term']}: {c['definition'][:200]}")
-        if res["chunks"]:
-            parts.append(f"FRAGMENTOS:")
-            for ch in res["chunks"][:2]:
-                parts.append(f"  [{ch['source']}] {ch['content'][:300]}")
-        return "\n".join(parts) if parts else f"No encontré info sobre '{inp.get('query')}'."
-
-    elif name == "ri_listar_documentos":
-        docs = get_document_list(inp.get("tipo"), DB_PATH)
-        if not docs:
-            return "No hay documentos en la KB."
-        return "\n".join([f"- [{d['type']}] {d['title']}" for d in docs])
-
-    elif name == "ri_stats":
-        stats = get_kb_stats(DB_PATH)
-        return (f"KB: {stats['documents']} docs, {stats['chunks']} chunks, "
-                f"{stats['concepts']} conceptos, {stats['qa']} QA.")
-
-    # ── Gmail / Calendar ──────────────────────────────────────────────────────
-    elif name == "gmail_leer":
-        return gmail_leer(inp.get("count", 10), inp.get("dias"), inp.get("query"))
-
-    elif name == "gmail_ver_email":
-        return gmail_ver_email(inp["email_id"])
-
-    elif name == "gmail_enviar":
-        adjunto = PDF_PATH if inp.get("adjuntar_pdf") else None
-        return gmail_enviar(inp["to"], inp["subject"], inp["body"], adjunto)
-
-    elif name == "calendar_ver":
-        return calendar_ver(inp.get("desde"), inp.get("hasta"))
-
-    elif name == "calendar_crear":
-        return calendar_crear(inp["title"], inp["start"], inp["end"],
-                              inp.get("description",""), inp.get("location",""))
-
-    # ── Config ────────────────────────────────────────────────────────────────
-    elif name == "config_guardar":
-        import json as _j
-        val = inp['value']
-        try: val = _j.loads(val)
-        except Exception: pass
-        meta = save_config(inp['namespace'], inp['key'], val, inp.get('description',''), db_path=DB_PATH)
-        return f"Config guardada: {meta['namespace']}.{meta['key']} v{meta['version']}"
-
-    elif name == "config_leer":
-        meta = get_config_meta(inp['namespace'], inp['key'], db_path=DB_PATH)
-        if not meta:
-            return f"No encontré: {inp['namespace']}.{inp['key']}"
-        return f"{meta['namespace']}.{meta['key']} v{meta['version']}: {meta['value']}"
-
-    elif name == "config_listar":
-        configs = list_configs(inp.get('namespace'), db_path=DB_PATH)
-        if not configs:
-            return "No hay configs."
-        return "\n".join([f"  {c['namespace']}.{c['key']} v{c['version']}" for c in configs])
-
-    # ── Agent ops ─────────────────────────────────────────────────────────────
-    elif name == "agent_log":
-        log_change(instruction=inp["instruction"], action=inp["action"],
-                   result=inp["result"], status=inp.get("status","done"),
-                   requires=inp.get("requires"), chat_id=chat_id, db_path=DB_PATH)
-        return "Registrado en changelog."
-
-    elif name == "agent_guardar_secret":
-        key_name = inp.get("key_name", "").upper().replace(" ","_")
-        value    = inp.get("value", "")
-        service  = inp.get("service")
-        desc     = inp.get("description","")
-        masked   = store_secret(key_name, value, service, desc, DB_PATH)
-        os.environ[key_name] = value
-        return f"Secret guardado: {key_name} (enmascarado: {masked})"
-
-    elif name == "buscar_reserva":
-        from modules.reservas import buscar_disponibilidad
-        restaurante = inp["restaurante"]
-        fecha       = inp["fecha"]
-        personas    = inp.get("personas", 2)
-        hora        = inp.get("hora", "")
-        data = _asyncio.run(buscar_disponibilidad(restaurante, fecha, personas, hora))
-        if data.get("disponible"):
-            horarios = data.get("horarios", [])
-            if horarios:
-                return (f"Disponibilidad en {data.get('nombre', restaurante)} "
-                        f"para {personas} personas el {fecha}:\n" +
-                        "\n".join(f"  - {h}" for h in horarios[:10]))
-            return f"Hay disponibilidad en {restaurante} para {fecha} x{personas}."
-        return data.get("error") or f"Sin disponibilidad en {restaurante} para {fecha} x{personas}."
-
-    elif name == "enviar_voz":
-        texto_voz = inp.get("texto", "")[:400]
-        ogg = texto_a_voz(texto_voz)
-        if ogg:
-            with open(ogg, "rb") as f:
-                contenido = f.read()
-            os.unlink(ogg)
-            extra_files_ref.append(("respuesta.ogg", contenido, "voice"))
-            return "[voz enviada]"
-        return texto_voz
-
-    elif name == "buscar_video":
-        import yt_dlp as _ytdlp
-        query   = inp["query"]
-        max_dur = inp.get("max_duration", 900)
-        titulo, url, canal, mins, segs = None, None, None, 0, 0
-        try:
-            with _ytdlp.YoutubeDL({"quiet":True,"no_warnings":True,"noplaylist":True}) as ydl:
-                info = ydl.extract_info(f"ytsearch3:{query}", download=False)
-            entries = [e for e in (info.get("entries") or []) if e and e.get("duration",0) <= max_dur]
-            if entries:
-                v      = entries[0]
-                titulo = v.get("title","")
-                url    = v.get("webpage_url","")
-                canal  = v.get("uploader","")
-                dur    = int(v.get("duration",0) or 0)
-                mins, segs = dur//60, dur%60
-        except Exception:
-            pass
-        if url:
-            meta = f"{canal} | {mins}:{segs:02d}" if canal and mins else canal or ""
-            extra_files_ref.append(("video_link", f"{titulo}\n{url}\n{meta}".encode(), "video_link"))
-            return f"[video: {titulo}]"
-        return f"No encontré videos para: {query}"
-
-    elif name == "mcp_tool":
-        try:
-            from mcp_client import call_mcp_tool_sync
-            tool_name = inp["tool_name"]
-            args      = inp.get("args", {})
-            log.info(f"[{chat_id}] MCP tool: {tool_name} args={list(args.keys())}")
-            return call_mcp_tool_sync(tool_name, args)
-        except Exception as e:
-            log.error(f"mcp_tool error: {e}")
-            return f"Error MCP: {e}"
-
-    return f"Tool no reconocida: {name}"
 def _detect_confirmation_question(text: str):
     """
     Detecta botones SOLO cuando Claude los pide explícitamente con [BOTONES: op1 | op2].
