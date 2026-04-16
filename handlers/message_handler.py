@@ -132,8 +132,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         log.info(f"[{chat_id}] Bot: {reply[:80]}...")
     except Exception as e:
-        log.error(f"Error: {e}")
-        await update.message.reply_text("Tardo demasiado o hubo un error, intentalo de nuevo.")
+        import traceback
+        err_detail = traceback.format_exc()[-500:]
+        log.error(f"Error en handle_message: {e}\n{err_detail}")
+        await update.message.reply_text(f"Error: {str(e)[:200]}")
 
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
