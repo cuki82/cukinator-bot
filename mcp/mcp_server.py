@@ -601,10 +601,30 @@ for src in [ops, github, memory, knowledge]:
     for name, tool in src._tool_manager._tools.items():
         mcp._tool_manager._tools[name] = tool
 
+# ASGI app para Railway
 app = mcp.streamable_http_app()
+
+# Agregar health check al ASGI app via middleware
+from starlette.routing import Route, Mount
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+from starlette.applications import Starlette
+
+async def health(request: Request):
+    return JSONResponse({
+        "status": "ok",
+        "tools": len(mcp._tool_manager._tools),
+        "tool_names": list(mcp._tool_manager._tools.keys())
+    })
+
+# Wrapper con health check en /health y MCP en /mcp
+root_app = Starlette(routes=[
+    Route("/health", health),
+    Mount("/", app=app),
+])
 
 
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 3350))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run("mcp_server:root_app", host="0.0.0.0", port=port)
