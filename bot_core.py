@@ -1530,30 +1530,11 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
     ]
 
     # ── Delegación a agente especializado (non-conversational) ─────────────────
-    if intent != "conversational" and is_owner:
-        _extra_files_ref = []
-        _pdf_ref = [None]
-
-        def _tool_handler_for_agent(block):
-            # Ejecuta el tool real y acumula resultados
-            result_str = _dispatch_single_tool(block, chat_id, _pdf_ref, _extra_files_ref)
-            return result_str, [], None
-
-        # Pasar historial al agente
-        _history = get_history_full(chat_id, limit=10, db_path=DB_PATH)
-
-        agent_task = AgentTask(
-            intent=intent, user_text=user_text,
-            chat_id=chat_id, user_name=user_name or "",
-            history=_history
-        )
-        response, ef, pp = route_and_execute(agent_task, tools_activos, _tool_handler_for_agent)
-
-        if response:
-            all_extras = ef + _extra_files_ref
-            pdf = pp or _pdf_ref[0]
-            return response, pdf, all_extras
-        # Si el pipeline devuelve vacío, cae al flujo conversacional
+    # Multi-agent routing — desactivado temporalmente (causa timeouts)
+    # El intent se loguea para diagnóstico pero todos van al flujo directo
+    # TODO: activar cuando optimicemos latencia de agentes
+    # if intent != "conversational" and is_owner:
+    #     ...
 
     # ── Flujo conversacional directo ───────────────────────────────────────────
     history = get_history_full(chat_id, limit=MAX_HISTORY, db_path=DB_PATH)
