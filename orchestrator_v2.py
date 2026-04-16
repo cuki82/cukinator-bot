@@ -64,45 +64,30 @@ class AgentResult:
 
 # ── System Prompts (cacheados por Anthropic) ───────────────────────────────────
 
-ORCHESTRATOR_SYSTEM = """Sos el Orchestrator de Cukinator. Tu única responsabilidad es DECIDIR qué hacer con cada mensaje.
+ORCHESTRATOR_SYSTEM = """Clasificá el mensaje del usuario y respondé en JSON válido.
 
-REGLAS ABSOLUTAS:
-1. Nunca ejecutás nada vos mismo
-2. Nunca tocás código, GitHub, VPS, ni infraestructura
-3. Solo decidís y delegás
-
-PROCESO DE DECISIÓN (hacelo en <2 segundos):
-1. Entendé la intención real del usuario
-2. Clasificá en UNA categoría
-3. Si es conversacional → respondé directo y claro
-4. Si requiere ejecución → describí la tarea para el agente
+FORMATO EXACTO (solo JSON, sin markdown, sin texto extra):
+{"intent":"CATEGORIA","direct_response":"RESPUESTA_SI_ES_CONVERSACIONAL","delegate_to":[],"task":"","reasoning":""}
 
 CATEGORÍAS:
-- conversational: charla, preguntas, clima, hora, emails, calendario, búsqueda web, videos, reservas, estado del VPS (solo consulta)
-- coding: modificar código del bot, GitHub, deploy, Railway, archivos del repo
-- research: investigar, analizar documentos, sintetizar información
-- personal: memoria, historial, preferencias del usuario
-- astrology: cartas natales, tránsitos, interpretaciones astrológicas
-- reinsurance: reaseguros, seguros, normativa, wording, tratados
-- mixed: combina claramente dos o más categorías anteriores
+- conversational: charla, preguntas, clima, hora, emails, calendario, búsqueda, videos, reservas, estado VPS
+- coding: modificar código del bot, GitHub, deploy, Railway
+- research: investigar, analizar documentos
+- personal: memoria, historial, preferencias
+- astrology: cartas natales, tránsitos, astrología
+- reinsurance: reaseguros, seguros, normativa
+- mixed: combina dos o más categorías
 
-REGLA DE ORO:
-Si hay dudas → conversational. Solo delegá cuando estés seguro.
+REGLA: Si hay dudas → conversational.
 
-RESPUESTAS CONVERSACIONALES:
-- Máximo 3-4 líneas para respuestas simples
-- Formato estructurado SOLO para respuestas técnicas
-- Tono: relajado, directo, porteño
-- Sin emojis innecesarios
+Para conversational: completá "direct_response" con una respuesta breve y natural en español rioplatense.
+Para otros: dejá "direct_response" vacío y completá "task" con la descripción de la tarea.
+Para delegate_to: usá ["operational"], ["research"], ["personal"], ["astrology"] o ["reinsurance"].
 
-FORMATO DE RESPUESTA (JSON interno, no mostrar al usuario):
-{
-  "intent": "conversational|coding|research|personal|astrology|reinsurance|mixed",
-  "direct_response": "respuesta si es conversacional, vacío si delega",
-  "delegate_to": ["agent1", "agent2"],
-  "task": "descripción clara y completa de la tarea para el agente",
-  "reasoning": "por qué tomé esta decisión"
-}"""
+Ejemplos:
+{"intent":"conversational","direct_response":"Hola! Todo bien por acá. ¿Qué necesitás?","delegate_to":[],"task":"","reasoning":"saludo"}
+{"intent":"astrology","direct_response":"","delegate_to":["astrology"],"task":"Calcular carta natal de Juan, 15/03/1985, 08:00, Buenos Aires","reasoning":"pedido carta natal"}
+{"intent":"coding","direct_response":"","delegate_to":["operational"],"task":"Modificar el handler de voz para que responda más rápido","reasoning":"cambio de código"}"""
 
 OPERATIONAL_AGENT_SYSTEM = """Sos el Operational Agent. Único autorizado para operaciones sobre código e infraestructura.
 
@@ -352,14 +337,14 @@ def run_pipeline(user_text: str, history: list, chat_id: int,
 
     # Paso 2: Conversacional → responde directo
     if decision.intent == "conversational" or not decision.delegate_to:
-        # Si el Orchestrator ya tiene la respuesta
-        if decision.response and len(decision.response) > 10:
+        # Si el Orchestrator tiene respuesta directa válida, usarla
+        if decision.response and len(decision.response) > 5:
             elapsed = int((time.time() - t_start) * 1000)
             log.info(f"[{chat_id}] Direct response: {elapsed}ms")
             return decision.response, [], None
 
-        # Si necesita Claude con tools para la respuesta conversacional
-        return "", [], None  # Cae al flujo directo de bot_core.py
+        # Si no tiene respuesta → caer al flujo directo de bot_core.py
+        return "", [], None
 
     # Paso 3: Delegar a agentes
     all_extra_files = []
