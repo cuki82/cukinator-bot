@@ -593,7 +593,6 @@ def add_document(title: str, content: str, doc_type: str = "general",
 # MCP SERVER — Un solo servidor con todos los tools
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# Un solo FastMCP server con todos los tools de los 4 namespaces
 mcp = FastMCP("cukinator")
 
 # Copiar tools de cada namespace al servidor principal
@@ -601,30 +600,26 @@ for src in [ops, github, memory, knowledge]:
     for name, tool in src._tool_manager._tools.items():
         mcp._tool_manager._tools[name] = tool
 
-# ASGI app para Railway
+# ASGI app — FastMCP expone en /mcp
 app = mcp.streamable_http_app()
 
-# Agregar health check al ASGI app via middleware
-from starlette.routing import Route, Mount
+# Inyectar /health directamente en las rutas del app
+from starlette.routing import Route
 from starlette.requests import Request
 from starlette.responses import JSONResponse
-from starlette.applications import Starlette
 
 async def health(request: Request):
     return JSONResponse({
         "status": "ok",
         "tools": len(mcp._tool_manager._tools),
+        "mcp_endpoint": "/mcp",
         "tool_names": list(mcp._tool_manager._tools.keys())
     })
 
-# Wrapper con health check en /health y MCP en /mcp
-root_app = Starlette(routes=[
-    Route("/health", health),
-    Mount("/", app=app),
-])
+app.routes.insert(0, Route("/health", health))
 
 
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 3350))
-    uvicorn.run("mcp_server:root_app", host="0.0.0.0", port=port)
+    uvicorn.run("mcp_server:app", host="0.0.0.0", port=port)
