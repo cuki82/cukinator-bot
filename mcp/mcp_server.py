@@ -593,10 +593,10 @@ def add_document(title: str, content: str, doc_type: str = "general",
 # ASGI APP — Monta los 4 servidores en paths distintos
 # ═══════════════════════════════════════════════════════════════════════════════
 
-ops_app      = ops.get_asgi_app()
-github_app   = github.get_asgi_app()
-memory_app   = memory.get_asgi_app()
-knowledge_app = knowledge.get_asgi_app()
+ops_app       = ops.streamable_http_app()
+github_app    = github.streamable_http_app()
+memory_app    = memory.streamable_http_app()
+knowledge_app = knowledge.streamable_http_app()
 
 app = Starlette(routes=[
     Mount("/ops",       app=ops_app),
