@@ -1224,6 +1224,27 @@ TOOLS = [
             },
             "required": ["action"]
         }
+    },
+    {
+        "name": "mcp_tool",
+        "description": (
+            "Llama a un tool del MCP Server (capa de acceso estándar a sistemas). "
+            "Usá para operaciones avanzadas de VPS, GitHub, memoria y knowledge base "
+            "que no están cubiertas por los tools directos. "
+            "Tools disponibles en MCP: vps_status, vps_exec, docker_ps, docker_logs, "
+            "docker_restart, service_health, read_file_vps, write_file_vps, "
+            "repo_status, read_file_github, push_file, create_pr, list_prs, "
+            "search_memory, save_fact, get_recent_history, memory_stats, "
+            "search_knowledge, list_documents, kb_stats, add_document."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "tool_name": {"type": "string", "description": "Nombre del tool MCP a ejecutar"},
+                "args":      {"type": "object", "description": "Argumentos del tool como objeto JSON"}
+            },
+            "required": ["tool_name"]
+        }
     }
 ]
 
@@ -1410,6 +1431,12 @@ Herramientas disponibles:
 - vps_leer_archivo: leer cualquier archivo del VPS
 - vps_escribir_archivo: modificar cualquier archivo del VPS
 - vps_docker: control de contenedores (ps, restart, logs, stats, stop, start)
+- mcp_tool: acceso al MCP Server con 21 tools avanzados (vps_status, docker_ps, repo_status, search_memory, search_knowledge, etc.)
+
+MCP LAYER:
+Usá mcp_tool cuando necesites operaciones avanzadas no cubiertas por los tools directos.
+Ejemplo: mcp_tool(tool_name="vps_status") para estado completo del VPS.
+Ejemplo: mcp_tool(tool_name="search_knowledge", args={"query": "quota share"}) para KB.
 
 PROTOCOLO VPS — CRÍTICO:
 - Ejecutá LA MÍNIMA cantidad de tools necesarias. Máximo 2-3 tools por respuesta.
@@ -2642,6 +2669,17 @@ def _dispatch_single_tool(block, chat_id: int, pdf_ref: list, extra_files_ref: l
             extra_files_ref.append(("video_link", f"{titulo}\n{url}\n{meta}".encode(), "video_link"))
             return f"[video: {titulo}]"
         return f"No encontré videos para: {query}"
+
+    elif name == "mcp_tool":
+        try:
+            from mcp_client import call_mcp_tool_sync
+            tool_name = inp["tool_name"]
+            args      = inp.get("args", {})
+            log.info(f"[{chat_id}] MCP tool: {tool_name} args={list(args.keys())}")
+            return call_mcp_tool_sync(tool_name, args)
+        except Exception as e:
+            log.error(f"mcp_tool error: {e}")
+            return f"Error MCP: {e}"
 
     return f"Tool no reconocida: {name}"
 def _detect_confirmation_question(text: str):
