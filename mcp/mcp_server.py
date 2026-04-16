@@ -590,40 +590,18 @@ def add_document(title: str, content: str, doc_type: str = "general",
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# ASGI APP — Monta los 4 servidores en paths distintos
+# MCP SERVER — Un solo servidor con todos los tools
 # ═══════════════════════════════════════════════════════════════════════════════
 
-ops_app       = ops.streamable_http_app()
-github_app    = github.streamable_http_app()
-memory_app    = memory.streamable_http_app()
-knowledge_app = knowledge.streamable_http_app()
+# Un solo FastMCP server con todos los tools de los 4 namespaces
+mcp = FastMCP("cukinator")
 
-app = Starlette(routes=[
-    Mount("/ops",       app=ops_app),
-    Mount("/github",    app=github_app),
-    Mount("/memory",    app=memory_app),
-    Mount("/knowledge", app=knowledge_app),
-])
+# Copiar tools de cada namespace al servidor principal
+for src in [ops, github, memory, knowledge]:
+    for name, tool in src._tool_manager._tools.items():
+        mcp._tool_manager._tools[name] = tool
 
-
-# ── Health check raíz ──────────────────────────────────────────────────────────
-from starlette.requests import Request
-from starlette.responses import JSONResponse
-
-async def health(request: Request):
-    return JSONResponse({
-        "status": "ok",
-        "servers": ["ops", "github", "memory", "knowledge"],
-        "endpoints": {
-            "ops":       "/ops/mcp",
-            "github":    "/github/mcp",
-            "memory":    "/memory/mcp",
-            "knowledge": "/knowledge/mcp",
-        }
-    })
-
-from starlette.routing import Route
-app.routes.insert(0, Route("/health", health))
+app = mcp.streamable_http_app()
 
 
 if __name__ == "__main__":
