@@ -27,3 +27,4 @@ COPY handlers/ ./handlers/
 COPY modules/ ./modules/
 
 CMD ["python", "bot.py"]
+# cache-bust: 20260416_2025
