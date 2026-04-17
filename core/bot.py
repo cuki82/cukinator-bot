@@ -41,12 +41,14 @@ from core.bot_core import (
 logging.basicConfig(format="%(asctime)s [%(levelname)s] %(message)s", level=logging.INFO)
 
 if __name__ == "__main__":
-    if os.environ.get("DISABLE_BOT", "").lower() in ("true", "1"):
+    _on_railway = bool(os.environ.get("RAILWAY_ENVIRONMENT_NAME") or os.environ.get("RAILWAY_PROJECT_ID"))
+    _disabled = os.environ.get("DISABLE_BOT", "").lower() in ("true", "1")
+    if _on_railway or _disabled:
         import http.server, threading
         port = int(os.environ.get("PORT", "8080"))
         def _health(req): req.send_response(200); req.end_headers(); req.wfile.write(b'{"status":"standby"}')
         httpd = http.server.HTTPServer(("", port), type("H", (http.server.BaseHTTPRequestHandler,), {"do_GET": _health, "log_message": lambda *a: None}))
-        log.info(f"DISABLE_BOT=true — Railway standby en :{port}")
+        log.info(f"Standby mode (railway={_on_railway}, disabled={_disabled}) en :{port}")
         httpd.serve_forever()
     init_db()
     log.info("🤖 CukinatorBot iniciando (arquitectura modular)...")
