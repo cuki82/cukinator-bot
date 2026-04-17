@@ -1,64 +1,129 @@
 """
-intent_router.py — Clasificador de intenciones para el bot de Telegram.
-
-Dos categorías principales:
-- conversational: el bot responde directo con Claude
-- coding_task: se delega al Agent Worker en el VPS
-
-El router es deliberadamente simple — el Orchestrator no necesita
-ser sofisticado para clasificar. Claude lo hace mejor que reglas.
+agents/intent_router.py — Clasificador de intenciones. Zero latencia, zero costo.
+Clasifica en 6 intents via keywords antes de llegar a cualquier LLM.
 """
-
-import os
+import re
 import logging
-import anthropic
 
 log = logging.getLogger(__name__)
 
-ANTHROPIC_KEY = os.environ.get("ANTHROPIC_KEY", "")
+# ── Keywords por intent ────────────────────────────────────────────────────────
 
-# ── Clasificador via Claude (rápido, modelo pequeño) ──────────────────────────
+_PATTERNS = {
+    "coding": [
+        r"modific[aá] el bot", r"cambi[aá] el c[oó]digo", r"edit[aá] el archivo",
+        r"nuevo m[oó]dulo", r"nueva funci[oó]n", r"nuevo handler", r"nuevo tool",
+        r"push a github", r"hac[eé] un commit", r"abr[ií] un pr", r"pull request",
+        r"refactoriz[aá]", r"reescrib[ií]", r"agregá? un tool", r"agregá? un handler",
+        r"cambi[aá] el system prompt", r"modific[aá] bot_core", r"nueva integraci[oó]n al bot",
+        r"deploy", r"dockerfile", r"requirements\.txt",
+    ],
+    "research": [
+        r"busca[rn]?", r"investiga[rn]?", r"encontr[aá]", r"qu[eé] dice", r"qu[eé] es",
+        r"c[oó]mo funciona", r"explic[aá]", r"compara[rn]?", r"an[aá]liz[aá]",
+        r"resumen", r"noticias", r"último[s]?", r"informaci[oó]n sobre",
+        r"documentaci[oó]n", r"normativa", r"regulaci[oó]n",
+    ],
+    "reinsurance": [
+        r"reaseguro", r"reinsur", r"p[oó]liza", r"wording", r"cl[aá]usula",
+        r"siniestro", r"prima", r"cobertura", r"cedente", r"reasegurador",
+        r"treaty", r"facultativo", r"xs[lL]", r"excess of loss", r"quota share",
+        r"retenci[oó]n", r"contrato de reaseguro", r"programa",
+    ],
+    "astrology": [
+        r"astro", r"carta natal", r"tr[aá]nsito", r"planeta", r"signo",
+        r"ascendente", r"luna", r"mercurio", r"venus", r"marte", r"j[uú]piter",
+        r"saturno", r"ur[aá]no", r"neptuno", r"plut[oó]n", r"h[oó]roscopo",
+        r"casa [0-9]", r"conjunci[oó]n", r"oposici[oó]n", r"trígono",
+    ],
+    "personal": [
+        r"recorda[rn]?", r"guard[aá]", r"mi preferencia", r"mis datos",
+        r"cu[aá]ndo dije", r"qu[eé] dijiste", r"mi historial", r"acord[aá]te",
+        r"anot[aá]", r"mi perfil", r"mis contactos", r"agenda personal",
+    ],
+    "coding": [  # duplicado intencionalmente — se fusiona abajo
+    ],
+}
 
-ROUTER_SYSTEM = """Sos un clasificador de intenciones. Analizás el mensaje del usuario y devolvés EXACTAMENTE una de estas categorías:
+# Orden de prioridad (primero gana)
+_PRIORITY = ["coding", "reinsurance", "astrology", "personal", "research", "conversational"]
 
-conversational
-coding_task
+# ── Clasificador ───────────────────────────────────────────────────────────────
 
-REGLAS:
-- coding_task si el mensaje implica: editar código, modificar archivos del bot, cambiar handlers, agregar módulos, tocar GitHub, hacer commits, abrir PRs, cambiar configuración del repo, modificar el bot en sí mismo.
-- conversational para TODO lo demás: preguntas, búsquedas, clima, emails, calendario, VPS status, astrología, reservas, charla general, análisis, explicaciones.
-
-Respondé SOLO con la categoría. Sin explicación. Sin puntos. Solo la palabra."""
-
-_client = None
-
-def _get_client():
-    global _client
-    if _client is None:
-        _client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
-    return _client
-
-
-def classify(user_text: str) -> str:
+def classify(text: str) -> str:
     """
-    Clasifica usando SOLO keywords — sin llamada a API.
-    Sin latencia, sin costo.
+    Clasifica el intent del mensaje. Zero latencia, zero costo.
+    Retorna uno de: coding, research, reinsurance, astrology, personal, conversational
     """
-    return _keyword_classify(user_text)
+    t = text.lower()
+
+    scores = {intent: 0 for intent in _PRIORITY}
+
+    for intent, patterns in _PATTERNS.items():
+        if intent not in scores:
+            continue
+        for p in patterns:
+            if re.search(p, t):
+                scores[intent] += 1
+
+    # El intent con más matches gana (mínimo 1)
+    best = max(scores, key=scores.get)
+    result = best if scores[best] > 0 else "conversational"
+
+    log.debug(f"Intent '{result}' para: {text[:60]}")
+    return result
 
 
-def _keyword_classify(text: str) -> str:
-    """Fallback por keywords cuando la API falla."""
-    text_lower = text.lower()
-    coding_keywords = [
-        "modificá el bot", "modifica el bot", "cambiá el código", "cambia el código",
-        "agregá un handler", "agrega un handler", "nuevo módulo", "nueva función",
-        "editá", "edita el archivo", "cambiá bot_core", "modifica bot_core",
-        "push a github", "hacé un commit", "hace un commit", "abrí un pr", "abri un pr",
-        "cambiá el system prompt", "modifica el system prompt",
-        "agregá un tool", "agrega un tool", "nueva integración al bot",
-        "refactorizá", "refactoriza", "reescribí", "reescribe",
+def classify_complexity(text: str) -> str:
+    """
+    Estima la complejidad de la tarea para elegir el modelo.
+    Retorna: simple | medium | complex
+    """
+    t = text.lower()
+    word_count = len(text.split())
+
+    complex_signals = [
+        r"anali[zs][aá]", r"compar[aá]", r"redact[aá]", r"elabor[aá]",
+        r"en detalle", r"a fondo", r"completo", r"exhaustivo",
+        r"m[uú]ltiples", r"todos los", r"considera[rn]?",
     ]
-    if any(kw in text_lower for kw in coding_keywords):
-        return "coding_task"
-    return "conversational"
+    simple_signals = [
+        r"qu[eé] hora", r"clima", r"temperatura", r"hola", r"gr[aá]cias",
+        r"ok", r"listo", r"dale", r"perfecto", r"sí", r"no",
+    ]
+
+    if word_count < 8 or any(re.search(p, t) for p in simple_signals):
+        return "simple"
+    if word_count > 40 or any(re.search(p, t) for p in complex_signals):
+        return "complex"
+    return "medium"
+
+
+# Model mapping
+MODEL_MAP = {
+    ("simple",  "conversational"): "claude-haiku-4-5",
+    ("medium",  "conversational"): "claude-haiku-4-5",
+    ("complex", "conversational"): "claude-sonnet-4-6",
+    ("simple",  "research"):       "claude-haiku-4-5",
+    ("medium",  "research"):       "claude-sonnet-4-6",
+    ("complex", "research"):       "claude-sonnet-4-6",
+    ("simple",  "reinsurance"):    "claude-sonnet-4-6",
+    ("medium",  "reinsurance"):    "claude-sonnet-4-6",
+    ("complex", "reinsurance"):    "claude-opus-4-5",
+    ("simple",  "astrology"):      "claude-sonnet-4-6",
+    ("medium",  "astrology"):      "claude-sonnet-4-6",
+    ("complex", "astrology"):      "claude-sonnet-4-6",
+    ("simple",  "personal"):       "claude-haiku-4-5",
+    ("medium",  "personal"):       "claude-haiku-4-5",
+    ("complex", "personal"):       "claude-haiku-4-5",
+    ("simple",  "coding"):         "claude-sonnet-4-6",
+    ("medium",  "coding"):         "claude-sonnet-4-6",
+    ("complex", "coding"):         "claude-opus-4-5",
+}
+
+def select_model(text: str, intent: str = None) -> str:
+    """Elige el modelo óptimo según intent y complejidad."""
+    if intent is None:
+        intent = classify(text)
+    complexity = classify_complexity(text)
+    return MODEL_MAP.get((complexity, intent), "claude-haiku-4-5")

@@ -9,6 +9,11 @@ import os
 import tempfile
 import swisseph as swe
 import anthropic
+try:
+    from agents.intent_router import classify as _classify, select_model as _select_model
+except Exception:
+    def _classify(t): return "conversational"
+    def _select_model(t, i=None): return "claude-opus-4-5"
 from ddgs import DDGS
 from fpdf import FPDF
 from fpdf.enums import XPos, YPos
@@ -1496,10 +1501,14 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
     last_text = ""
     vps_tools_used = 0
 
+    _intent = _classify(user_text)
+    _model  = _select_model(user_text, _intent)
+    log.info(f"[{chat_id}] model={_model} intent={_intent}")
+
     while iteration < max_iterations:
         iteration += 1
         response = claude.messages.create(
-            model="claude-opus-4-5",
+            model=_model,
             max_tokens=4096,
             system=get_system_prompt(user_name=user_name, chat_id=chat_id),
             tools=tools_activos,
