@@ -11,6 +11,18 @@ try:
 except Exception as _ve:
     pass  # fallback to env vars
 
+# Diagnóstico al startup — no loguear valores, solo presencia.
+import logging as _logging_boot
+_logging_boot.basicConfig(level=_logging_boot.INFO)
+_boot_log = _logging_boot.getLogger("worker.boot")
+_boot_log.info(
+    "vault status: OPENAI_API_KEY=%s · TELEGRAM_TOKEN=%s · ANTHROPIC_KEY=%s · WORKER_SECRET=%s",
+    "set" if os.environ.get("OPENAI_API_KEY") else "MISSING",
+    "set" if os.environ.get("TELEGRAM_TOKEN") else "MISSING",
+    "set" if os.environ.get("ANTHROPIC_KEY") else "MISSING",
+    "set" if os.environ.get("WORKER_SECRET") else "MISSING",
+)
+
 import anthropic
 try:
     import openai
@@ -308,7 +320,10 @@ def _codex_client():
     return openai.OpenAI(api_key=key)
 
 
-CODEX_MODEL = os.environ.get("CODEX_MODEL", "gpt-5-codex")
+CODEX_MODEL = os.environ.get("CODEX_MODEL", "gpt-4o-mini")
+# Nota: gpt-5-codex requiere el endpoint v1/responses (nuevo), no chat/completions.
+# Usamos gpt-4o-mini por default: barato, rápido, compatible con chat/completions,
+# suficiente para planificar y resumir tareas de código.
 
 
 def codex_plan(user_text: str) -> str:
