@@ -62,6 +62,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             result = await send_coding_task(user_msg, chat_id)
             reply_text = format_worker_result(result)
+            if os.environ.get("BOT_TRACE", "").lower() in ("true", "1"):
+                elapsed = result.get("elapsed_seconds") or result.get("duration") or "?"
+                status  = result.get("status", "?")
+                model_hint = result.get("model") or "codex+claude-code-cli"
+                reply_text += (
+                    f"\n\n_\\[trace\\] via=`agent_worker@VPS:3335` · intent=`coding` · "
+                    f"model=`{model_hint}` · status=`{status}` · elapsed=`{elapsed}s`_"
+                )
             save_message_full(chat_id, "user", user_msg, db_path=DB_PATH)
             save_message_full(chat_id, "assistant", reply_text, db_path=DB_PATH)
             await send_long_message(context.bot, chat_id, reply_text, reply_to=update.message)

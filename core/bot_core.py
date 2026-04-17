@@ -1500,10 +1500,23 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
     iteration = 0
     last_text = ""
     vps_tools_used = 0
+    _tools_used: list = []  # orden de invocación, para trace footer
+    _rag_injected = False
 
     _intent = _classify(user_text)
     _model  = _select_model(user_text, _intent)
     log.info(f"[{chat_id}] model={_model} intent={_intent}")
+
+    def _trace_footer() -> str:
+        """Footer con model/intent/tools cuando BOT_TRACE=true. Vacío si no."""
+        if os.environ.get("BOT_TRACE", "").lower() not in ("true", "1"):
+            return ""
+        tools_str = ", ".join(_tools_used) if _tools_used else "(ninguno)"
+        rag_str = "sí" if _rag_injected else "no"
+        return (
+            f"\n\n_\\[trace\\] model=`{_model}` · intent=`{_intent}` · "
+            f"iters={iteration} · tools=[{tools_str}] · rag={rag_str}_"
+        )
 
     # RAG: inyectar contexto de KB para cualquier intent no-conversational.
     # build_context aplica un score threshold internamente, así que si la query
@@ -1523,6 +1536,7 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
             _rag_ctx = build_context(user_text, top_k=4, namespace=_ns)
             if _rag_ctx:
                 messages = [{"role": "user", "content": _rag_ctx + chr(10)*2 + user_text}]
+                _rag_injected = True
                 log.info(f"[{chat_id}] RAG context injected intent={_intent} ns={_ns} ({len(_rag_ctx)} chars)")
         except Exception as _re:
             log.debug(f"RAG skip: {_re}")
@@ -1544,6 +1558,7 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
 
             for block in response.content:
                 if block.type == "tool_use":
+                    _tools_used.append(block.name)
 
                     if block.name == "github_push":
                         try:
@@ -2294,7 +2309,7 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
                     text_parts.append(block.text.strip())
             if text_parts:
                 last_text = "\n".join(text_parts)
-                return last_text, pdf_path, extra_files
+                return last_text + _trace_footer(), pdf_path, extra_files
             # Claude terminó sin texto — forzar una respuesta
             messages.append({"role": "user", "content": "Resumí en 1-2 líneas qué hiciste y cuál fue el resultado."})
             force_resp = claude.messages.create(
@@ -2305,15 +2320,15 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
             )
             for block in force_resp.content:
                 if hasattr(block, "text") and block.text.strip():
-                    return block.text.strip(), pdf_path, extra_files
+                    return block.text.strip() + _trace_footer(), pdf_path, extra_files
             if last_text:
-                return last_text, pdf_path, extra_files
-            return "Listo — ejecuté el comando en el VPS.", pdf_path, extra_files
+                return last_text + _trace_footer(), pdf_path, extra_files
+            return "Listo — ejecuté el comando en el VPS." + _trace_footer(), pdf_path, extra_files
 
     # Límite de iteraciones alcanzado — devolver último texto o error
     if last_text:
-        return last_text, pdf_path, extra_files
-    return "Alcancé el límite de operaciones. Intentá con una instrucción más específica.", pdf_path, extra_files
+        return last_text + _trace_footer(), pdf_path, extra_files
+    return "Alcancé el límite de operaciones. Intentá con una instrucción más específica." + _trace_footer(), pdf_path, extra_files
 
 # ── Handlers Telegram ──────────────────────────────────────────────────────────
 def _detect_confirmation_question(text: str):
