@@ -10,3 +10,4 @@ oauth_flow.pkl
 /tmp/
 *.log
 .env
+.env.local

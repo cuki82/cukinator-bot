@@ -301,7 +301,7 @@ async def get_weather(location: str = "Buenos Aires") -> dict:
 
 # ── Skill: GitHub Push via API ─────────────────────────────────────────────────
 async def github_push(repo: str, path: str, content: str,
-                      message: str, branch: str = "bot-changes") -> dict:
+                      message: str, branch: str = "main") -> dict:
     """Crea o actualiza un archivo en GitHub via API."""
     import base64 as _b64
     token = os.environ.get("GITHUB_TOKEN")
@@ -345,7 +345,7 @@ async def github_push(repo: str, path: str, content: str,
 
 
 async def github_create_pr(repo: str, title: str, body: str,
-                           head: str = "bot-changes", base: str = "main") -> dict:
+                           head: str = "main", base: str = "main") -> dict:
     """Crea un Pull Request en GitHub para que el humano revise y apruebe."""
     token = os.environ.get("GITHUB_TOKEN")
     if not token:
@@ -707,7 +707,7 @@ TOOLS = [
     {
         "name": "github_push",
         "description": (
-            "Crea o actualiza un archivo en GitHub en la rama bot-changes (NO en main). "
+            "Crea o actualiza un archivo en GitHub en la rama main directamente. "
             "Usá para proponer cambios de código: módulos nuevos, scripts, configs. "
             "NUNCA usés para archivos core: bot.py, bot_core.py, handlers/, Dockerfile. "
             "Después de pushear, usá github_pr para crear el Pull Request para revisión. "
@@ -720,7 +720,7 @@ TOOLS = [
                 "path":    {"type": "string", "description": "Path del archivo (ej: modules/nuevo_modulo.py)"},
                 "content": {"type": "string", "description": "Contenido COMPLETO del archivo"},
                 "message": {"type": "string", "description": "Mensaje del commit"},
-                "branch":  {"type": "string", "description": "Branch. Default: bot-changes (NO usar main)"}
+                "branch":  {"type": "string", "description": "Branch. Default: main"}
             },
             "required": ["path", "content", "message"]
         }
@@ -1258,9 +1258,9 @@ CAPACIDADES OPERATIVAS DISPONIBLES:
 
 PARA CAMBIOS DE CÓDIGO (bot.py, bot_core.py, handlers/, Dockerfile):
 - NUNCA uses github_push para modificar archivos core del bot. Están protegidos.
-- Para módulos NUEVOS o scripts auxiliares: usá github_push (va a bot-changes automáticamente) y después github_pr para crear el Pull Request.
-- El flujo es: github_push → github_pr → el usuario aprueba el merge en GitHub → Railway deploya.
-- NUNCA pushees a main directamente. Siempre bot-changes → PR → merge.
+- Para módulos NUEVOS o scripts auxiliares: usá github_push directo a main.
+- El flujo es: github_push → Railway deploya automáticamente.
+- Pushea directo a main. Sin PRs.
 
 ANTE CREDENCIALES PEGADAS EN TELEGRAM:
 - Detectarlas automáticamente
@@ -1523,9 +1523,8 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
                             message = block.input["message"]
                             branch  = block.input.get("branch", "bot-changes")
 
-                            # Forzar bot-changes si intenta pushear a main
+                            # Push directo a main habilitado
                             if branch == "main":
-                                branch = "bot-changes"
 
                             # Archivos core protegidos
                             PROTECTED = ("bot.py", "bot_core.py", "handlers/message_handler.py",
