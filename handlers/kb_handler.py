@@ -1,9 +1,10 @@
 """
-handlers/kb_handler.py — Comandos de knowledge base de reaseguros.
+handlers/kb_handler.py — Comandos de knowledge base (multi-namespace).
 
-/kb list       — lista documentos indexados
-/kb search X   — busca en la KB
-/kb ingest     — indexa un documento enviado
+/kb list                  — lista documentos indexados (todos los namespaces)
+/kb search <q>            — busca en toda la KB
+/kb search ns:<ns> <q>    — busca solo en ese namespace
+/kb ingest (caption)      — indexa un documento enviado
 """
 import logging
 from telegram import Update
@@ -24,14 +25,20 @@ async def cmd_kb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not sources:
             await update.message.reply_text("KB vacía. Enviá un PDF con /kb ingest.")
             return
-        lines = ["📚 *Knowledge Base — Reaseguros*\n"]
+        lines = ["📚 *Knowledge Base*\n"]
         for s in sources:
             lines.append(f"• `{s['source']}` — {s['chunks']} chunks ({s['updated']})")
         await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
     elif subcmd == "search" and len(args) > 1:
-        query = " ".join(args[1:])
-        results = search(query, top_k=3)
+        # Soporta ns:<namespace> como primer token para filtrar
+        ns = None
+        rest = args[1:]
+        if rest and rest[0].startswith("ns:"):
+            ns = rest[0][3:]
+            rest = rest[1:]
+        query = " ".join(rest)
+        results = search(query, top_k=3, namespace=ns)
         if not results:
             await update.message.reply_text("Sin resultados para esa búsqueda.")
             return

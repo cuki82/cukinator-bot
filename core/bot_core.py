@@ -1505,14 +1505,25 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
     _model  = _select_model(user_text, _intent)
     log.info(f"[{chat_id}] model={_model} intent={_intent}")
 
-    # RAG: inyectar contexto de KB para intent reinsurance
-    if _intent == "reinsurance":
+    # RAG: inyectar contexto de KB para cualquier intent no-conversational.
+    # build_context aplica un score threshold internamente, así que si la query
+    # no matchea nada relevante simplemente devuelve "" y no infla el prompt.
+    # Namespace opcional por intent: filtra KB al dominio correspondiente.
+    if _intent != "conversational":
         try:
             from modules.rag_kb import build_context
-            _rag_ctx = build_context(user_text, top_k=4)
+            _ns_map = {
+                "reinsurance": "reinsurance",
+                "coding":      "cukinator",
+                "personal":    "personal",
+                "astrology":   "astrology",
+                "research":    None,  # busca en todos los namespaces
+            }
+            _ns = _ns_map.get(_intent)
+            _rag_ctx = build_context(user_text, top_k=4, namespace=_ns)
             if _rag_ctx:
                 messages = [{"role": "user", "content": _rag_ctx + chr(10)*2 + user_text}]
-                log.info(f"[{chat_id}] RAG context injected ({len(_rag_ctx)} chars)")
+                log.info(f"[{chat_id}] RAG context injected intent={_intent} ns={_ns} ({len(_rag_ctx)} chars)")
         except Exception as _re:
             log.debug(f"RAG skip: {_re}")
 

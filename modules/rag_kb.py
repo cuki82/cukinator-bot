@@ -1,10 +1,9 @@
 """
-modules/rag_kb.py — RAG engine para knowledge base de reaseguros.
+modules/rag_kb.py — RAG engine para knowledge base general del proyecto.
 
-Usa embeddings via Anthropic (claude) para generar representaciones,
-almacena en SQLite con vectores numpy, y hace retrieval por coseno.
-
-No requiere PostgreSQL ni pgvector — todo en SQLite + numpy.
+Vocabulario TF-IDF mixto: reaseguros + dominio Cukinator (bot/VPS/infra).
+Cada documento lleva un namespace para filtrar por dominio.
+Migrar a sentence-transformers cuando haga falta recall semántico real.
 """
 import os
 import json
@@ -24,11 +23,13 @@ CREATE TABLE IF NOT EXISTS kb_documents (
     content     TEXT NOT NULL,
     embedding   BLOB,
     metadata    TEXT DEFAULT '{}',
+    namespace   TEXT DEFAULT 'general',
     content_hash TEXT,
     created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(source, chunk_index)
 );
 CREATE INDEX IF NOT EXISTS idx_kb_source ON kb_documents(source);
+CREATE INDEX IF NOT EXISTS idx_kb_namespace ON kb_documents(namespace);
 """
 
 
@@ -36,6 +37,10 @@ def _conn():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     con = sqlite3.connect(DB_PATH)
     con.executescript(SCHEMA)
+    # Migración: agregar columna namespace si la tabla ya existía sin ella
+    cols = [r[1] for r in con.execute("PRAGMA table_info(kb_documents)").fetchall()]
+    if "namespace" not in cols:
+        con.execute("ALTER TABLE kb_documents ADD COLUMN namespace TEXT DEFAULT 'general'")
     con.commit()
     return con
 
@@ -65,21 +70,36 @@ def _embed(texts: list[str]) -> list[list[float]]:
     return [_tfidf_embed(t) for t in texts]
 
 
-# Vocabulario especializado en reaseguros para TF-IDF
+# Vocabulario mixto: reaseguros + dominio Cukinator (bot/infra/dev/productividad)
 _VOCAB = [
+    # Reaseguros
     "reaseguro", "reasegurador", "cedente", "cesion", "retrocesion",
     "prima", "siniestro", "cobertura", "clausula", "treaty", "facultativo",
-    "proporcional", "no proporcional", "exceso", "catastrofe", "XL",
-    "quota share", "surplus", "stop loss", "agregado", "ocurrencia",
+    "proporcional", "exceso", "catastrofe", "quota", "surplus", "stop",
     "retencion", "limite", "sublimite", "franquicia", "deducible",
-    "cartera", "riesgo", "exposicion", "acumulacion", "PML", "EML",
+    "cartera", "riesgo", "exposicion", "acumulacion", "pml", "eml",
     "vigencia", "renovacion", "slip", "bordero", "cuenta", "liquidacion",
-    "siniestralidad", "frecuencia", "severidad", "bornhuetter", "ibnr",
-    "reserva", "desarrollo", "triangulo", "actuarial", "modelo",
+    "siniestralidad", "frecuencia", "severidad", "ibnr",
+    "reserva", "desarrollo", "triangulo", "actuarial",
     "vida", "incendio", "responsabilidad", "marino", "aviacion",
-    "energia", "credito", "caucion", "tecnologia", "cyber",
-    "terremoto", "inundacion", "huracan", "viento", "granizo",
     "property", "casualty", "liability", "engineering", "agriculture",
+    # Cukinator / bot / infra
+    "cukinator", "bot", "telegram", "railway", "vps", "hostinger",
+    "systemd", "service", "docker", "container", "journalctl",
+    "worker", "agent", "orchestrator", "handler", "intent", "router",
+    "mcp", "tool", "endpoint", "health", "deploy", "commit", "push",
+    "github", "repo", "branch", "main", "pull", "dockerfile",
+    "python", "fastapi", "uvicorn", "pydantic", "sqlite", "postgres",
+    "vault", "fernet", "secret", "credential", "token", "env",
+    "memory", "kb", "rag", "embedding", "chunk", "search",
+    "claude", "anthropic", "openai", "llm", "api", "opus", "sonnet", "haiku",
+    # Personal / productividad
+    "gmail", "calendar", "email", "agenda", "evento", "reunion",
+    "reaemrica", "astro", "carta", "natal", "planeta", "signo",
+    "whatsapp", "voz", "audio", "whisper", "tts", "elevenlabs",
+    # Operación / estado
+    "error", "log", "debug", "bug", "fix", "refactor", "test",
+    "active", "running", "failed", "standby", "zombie", "conflict",
 ]
 
 _VOCAB_IDX = {w: i for i, w in enumerate(_VOCAB)}
@@ -126,11 +146,12 @@ def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> list[str]
     return chunks
 
 
-def ingest(source: str, text: str, metadata: dict = None) -> int:
+def ingest(source: str, text: str, metadata: dict = None, namespace: str = "general") -> int:
     """
     Indexa un documento en la KB.
     source: identificador unico (nombre de archivo, URL, etc.)
     text: contenido completo
+    namespace: dominio del doc (reinsurance, cukinator, personal, general, ...)
     Retorna cantidad de chunks indexados.
     """
     chunks = chunk_text(text)
@@ -142,24 +163,25 @@ def ingest(source: str, text: str, metadata: dict = None) -> int:
         content_hash = hashlib.md5(chunk.encode()).hexdigest()
         try:
             con.execute(
-                """INSERT OR REPLACE INTO kb_documents 
-                   (source, chunk_index, content, embedding, metadata, content_hash)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (source, i, chunk, _vec_to_blob(emb), meta_str, content_hash)
+                """INSERT OR REPLACE INTO kb_documents
+                   (source, chunk_index, content, embedding, metadata, namespace, content_hash)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (source, i, chunk, _vec_to_blob(emb), meta_str, namespace, content_hash)
             )
             indexed += 1
         except Exception as e:
             log.error(f"Error indexando chunk {i} de {source}: {e}")
     con.commit()
     con.close()
-    log.info(f"KB: indexados {indexed} chunks de '{source}'")
+    log.info(f"KB: indexados {indexed} chunks de '{source}' (ns={namespace})")
     return indexed
 
 
-def search(query: str, top_k: int = 5, source_filter: str = None) -> list[dict]:
+def search(query: str, top_k: int = 5, source_filter: str = None, namespace: str = None) -> list[dict]:
     """
     Busca los chunks mas relevantes para la query.
-    Retorna lista de dicts con content, source, score, metadata.
+    namespace: si se especifica, filtra por ese namespace.
+    Retorna lista de dicts con content, source, score, namespace, metadata.
     """
     query_vec = np.array(_embed([query])[0], dtype=np.float32)
     con = _conn()
@@ -168,14 +190,17 @@ def search(query: str, top_k: int = 5, source_filter: str = None) -> list[dict]:
     if source_filter:
         where += " AND source LIKE ?"
         params.append(f"%{source_filter}%")
+    if namespace:
+        where += " AND namespace = ?"
+        params.append(namespace)
     rows = con.execute(
-        f"SELECT source, chunk_index, content, embedding, metadata FROM kb_documents {where}",
+        f"SELECT source, chunk_index, content, embedding, metadata, namespace FROM kb_documents {where}",
         params
     ).fetchall()
     con.close()
 
     scored = []
-    for source, chunk_idx, content, emb_blob, meta_str in rows:
+    for source, chunk_idx, content, emb_blob, meta_str, ns in rows:
         emb = _blob_to_vec(emb_blob)
         score = _cosine(query_vec, emb)
         scored.append({
@@ -183,6 +208,7 @@ def search(query: str, top_k: int = 5, source_filter: str = None) -> list[dict]:
             "chunk_index": chunk_idx,
             "content": content,
             "score": score,
+            "namespace": ns or "general",
             "metadata": json.loads(meta_str or "{}")
         })
 
@@ -190,17 +216,28 @@ def search(query: str, top_k: int = 5, source_filter: str = None) -> list[dict]:
     return scored[:top_k]
 
 
-def build_context(query: str, top_k: int = 5) -> str:
+# Score mínimo para considerar un chunk relevante. Bajo este umbral se descarta
+# para no inyectar ruido en el prompt cuando la query no tiene match real en KB.
+MIN_SCORE = 0.15
+
+
+def build_context(query: str, top_k: int = 5, namespace: str = None, min_score: float = MIN_SCORE) -> str:
     """
     Arma el contexto RAG para incluir en el prompt de Claude.
+    Solo incluye chunks con score >= min_score. Retorna "" si no hay nada relevante.
     """
-    results = search(query, top_k=top_k)
+    results = search(query, top_k=top_k, namespace=namespace)
+    results = [r for r in results if r["score"] >= min_score]
     if not results:
         return ""
-    parts = ["Contexto relevante de la knowledge base de reaseguros:\n"]
+    header = "Contexto relevante de la knowledge base"
+    if namespace:
+        header += f" ({namespace})"
+    parts = [header + ":\n"]
     for i, r in enumerate(results, 1):
         score_pct = int(r["score"] * 100)
-        parts.append(f"[{i}] {r['source']} (relevancia {score_pct}%):\n{r['content']}\n")
+        ns_tag = f" · {r['namespace']}" if r.get("namespace") and r["namespace"] != "general" else ""
+        parts.append(f"[{i}] {r['source']}{ns_tag} (relevancia {score_pct}%):\n{r['content']}\n")
     return "\n".join(parts)
 
 
