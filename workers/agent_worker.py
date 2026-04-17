@@ -1,6 +1,7 @@
-import os, sys, subprocess, logging, time, threading
+import os, sys, subprocess, logging, time, threading, json, re
 from pathlib import Path
 from typing import Optional
+import requests as _req
 
 # Load vault secrets before any API client initialization
 try:
@@ -33,6 +34,187 @@ REPO_REMOTE   = f"https://{GITHUB_TOKEN}@github.com/cuki82/cukinator-bot.git"
 # el worker está ocupado, /task responde 409 con el task_id en curso.
 _repo_lock: threading.Lock = threading.Lock()
 _current_task: Optional[dict] = None
+
+# ── Streaming del progreso a Telegram ─────────────────────────────────────────
+# El worker postea un mensaje al chat del usuario y lo va editando en vivo
+# a medida que Claude Code CLI ejecuta tools. Esto evita el "cacho de texto"
+# final sin visibilidad de qué está pasando.
+
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
+
+_TOOL_EMOJI = {
+    "Bash": "⚡", "Read": "📖", "Edit": "✏️", "Write": "📝", "MultiEdit": "✏️",
+    "Grep": "🔍", "Glob": "🔎", "Task": "🧩", "TodoWrite": "📋",
+    "WebFetch": "🌐", "WebSearch": "🌐", "NotebookEdit": "📓",
+}
+
+
+def _tg_send(chat_id: int, text: str) -> Optional[int]:
+    if not TELEGRAM_TOKEN or not chat_id:
+        return None
+    try:
+        r = _req.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": text[:4000], "parse_mode": "Markdown"},
+            timeout=5,
+        )
+        if r.status_code == 200:
+            return r.json().get("result", {}).get("message_id")
+    except Exception as e:
+        log.warning(f"tg_send failed: {e}")
+    return None
+
+
+def _tg_edit(chat_id: int, message_id: int, text: str) -> bool:
+    if not TELEGRAM_TOKEN or not chat_id or not message_id:
+        return False
+    try:
+        r = _req.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageText",
+            json={"chat_id": chat_id, "message_id": message_id,
+                  "text": text[:4000], "parse_mode": "Markdown"},
+            timeout=5,
+        )
+        return r.status_code == 200
+    except Exception as e:
+        log.warning(f"tg_edit failed: {e}")
+        return False
+
+
+def _format_tool_line(name: str, inp: dict) -> str:
+    """Una sola línea estilo 'emoji Tool `arg-corto`'. Markdown-safe."""
+    emoji = _TOOL_EMOJI.get(name, "🔧")
+    desc = ""
+    if name == "Bash":
+        cmd = (inp.get("command") or "")[:70]
+        desc = f"`{cmd}`"
+    elif name in ("Read", "Edit", "MultiEdit", "Write", "NotebookEdit"):
+        path = (inp.get("file_path") or inp.get("path") or "")[:70]
+        desc = f"`{path}`"
+    elif name in ("Grep", "Glob"):
+        pat = (inp.get("pattern") or "")[:50]
+        desc = f"`{pat}`"
+    elif name in ("WebSearch", "WebFetch"):
+        q = (inp.get("query") or inp.get("url") or "")[:50]
+        desc = f"`{q}`"
+    elif name == "TodoWrite":
+        count = len(inp.get("todos") or [])
+        desc = f"_({count} ítems)_"
+    else:
+        desc = ""
+    return f"{emoji} *{name}* {desc}".strip()
+
+
+def _compose_progress(title: str, steps: list, footer: str = "") -> str:
+    """Arma el mensaje con header + pasos estilo árbol + footer."""
+    parts = [title, ""]
+    if steps:
+        for i, s in enumerate(steps):
+            prefix = "└─" if i == len(steps) - 1 and not footer else "├─"
+            parts.append(f"{prefix} {s}")
+    if footer:
+        parts.append(f"└─ {footer}")
+    return "\n".join(parts)
+
+
+def _run_claude_cli_streaming(prompt: str, chat_id: int, task_id: str) -> dict:
+    """
+    Lanza Claude Code CLI con --output-format stream-json y postea/edita
+    un mensaje en Telegram con el progreso en vivo. Retorna:
+      {final_text, tool_names, stdout_raw, returncode, errors}
+    """
+    env = dict(os.environ)
+    ak = os.environ.get("ANTHROPIC_KEY") or os.environ.get("ANTHROPIC_API_KEY", "")
+    if ak:
+        env["ANTHROPIC_API_KEY"] = ak
+
+    title = "⚡ *Agent Worker — Ejecutando*"
+    steps: list = []
+    msg_id = _tg_send(chat_id, _compose_progress(title, steps, "_iniciando..._"))
+
+    final_text = ""
+    tool_names: list = []
+    raw_lines: list = []
+    errors: list = []
+    last_edit = 0.0
+    EDIT_THROTTLE = 1.5  # segundos entre edits para no pegar rate limit
+
+    try:
+        proc = subprocess.Popen(
+            ["claude", "-p", prompt,
+             "--output-format", "stream-json", "--verbose",
+             "--dangerously-skip-permissions"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, cwd=REPO_PATH, env=env, bufsize=1,
+        )
+    except FileNotFoundError:
+        errors.append("claude CLI no encontrado en PATH")
+        _tg_edit(chat_id, msg_id, _compose_progress(title, steps, "❌ claude CLI no está instalado"))
+        return {"final_text": "", "tool_names": [], "stdout_raw": "", "returncode": -1, "errors": errors, "msg_id": msg_id}
+    except Exception as e:
+        errors.append(f"spawn error: {e}")
+        _tg_edit(chat_id, msg_id, _compose_progress(title, steps, f"❌ spawn error: {e}"))
+        return {"final_text": "", "tool_names": [], "stdout_raw": "", "returncode": -1, "errors": errors, "msg_id": msg_id}
+
+    try:
+        for line in proc.stdout:
+            raw_lines.append(line)
+            line_s = line.strip()
+            if not line_s:
+                continue
+            try:
+                evt = json.loads(line_s)
+            except json.JSONDecodeError:
+                continue
+
+            etype = evt.get("type")
+            if etype == "assistant":
+                msg = evt.get("message") or {}
+                for block in (msg.get("content") or []):
+                    btype = block.get("type")
+                    if btype == "tool_use":
+                        nm = block.get("name", "")
+                        tool_names.append(nm)
+                        steps.append(_format_tool_line(nm, block.get("input") or {}))
+                        now = time.time()
+                        if now - last_edit > EDIT_THROTTLE:
+                            _tg_edit(chat_id, msg_id, _compose_progress(title, steps, "_en progreso..._"))
+                            last_edit = now
+                    elif btype == "text":
+                        txt = (block.get("text") or "").strip()
+                        if txt:
+                            final_text = txt
+            elif etype == "result":
+                rt = evt.get("result") or evt.get("content") or ""
+                if rt:
+                    final_text = rt if isinstance(rt, str) else str(rt)
+
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        errors.append("timeout esperando a que cierre claude CLI")
+        proc.terminate()
+    except Exception as e:
+        errors.append(f"stream error: {e}")
+
+    stderr_raw = ""
+    try:
+        stderr_raw = proc.stderr.read() or ""
+    except Exception:
+        pass
+    if proc.returncode and proc.returncode != 0:
+        errors.append(f"claude rc={proc.returncode}: {stderr_raw[:300]}")
+
+    footer = f"✅ *Listo* · {len(tool_names)} tools usadas" if not errors else f"⚠️ terminó con errores ({len(errors)})"
+    _tg_edit(chat_id, msg_id, _compose_progress(title, steps, footer))
+
+    return {
+        "final_text": final_text,
+        "tool_names": tool_names,
+        "stdout_raw": "".join(raw_lines),
+        "returncode": proc.returncode,
+        "errors": errors,
+        "msg_id": msg_id,
+    }
 
 class CodingTask(BaseModel):
     task_id: str
@@ -175,37 +357,22 @@ def run_agent(task):
     start = time.time()
     modified_files, git_info, errors = [], {}, []
 
+    # Paso 1: plan + mensaje inicial de "planificando"
+    _tg_plan_id = _tg_send(task.chat_id, "🧠 *Agent Worker — Planificando*\n_armando prompt técnico con Codex..._")
     log.info(f"[{task.task_id}] codex_plan: building prompt...")
     enhanced = codex_plan(task.user_text)
     log.info(f"[{task.task_id}] codex_plan OK ({len(enhanced)} chars)")
-
-    # Ensure claude CLI has access to the Anthropic key
-    env = dict(os.environ)
-    ak = os.environ.get("ANTHROPIC_KEY") or os.environ.get("ANTHROPIC_API_KEY", "")
-    if ak:
-        env["ANTHROPIC_API_KEY"] = ak
-
-    log.info(f"[{task.task_id}] Launching Claude Code CLI...")
-    try:
-        proc = subprocess.run(
-            ["claude", "-p", enhanced, "--dangerously-skip-permissions"],
-            capture_output=True, text=True, timeout=600,
-            cwd=REPO_PATH, env=env
+    if _tg_plan_id:
+        _tg_edit(
+            task.chat_id, _tg_plan_id,
+            f"🧠 *Planificado* · _{len(enhanced)} chars_\n└─ paso al executor",
         )
-        raw_output = proc.stdout
-        raw_err = proc.stderr
-        log.info(f"[{task.task_id}] Claude Code done, rc={proc.returncode}, stdout={len(raw_output)} chars")
-        if proc.returncode != 0:
-            errors.append(f"claude CLI rc={proc.returncode}: {raw_err[:500]}")
-    except subprocess.TimeoutExpired:
-        errors.append("claude CLI timeout (600s)")
-        raw_output = ""
-    except FileNotFoundError:
-        errors.append("claude CLI no encontrado en PATH")
-        raw_output = ""
-    except Exception as e:
-        errors.append(f"claude CLI error: {e}")
-        raw_output = ""
+
+    # Paso 2: executor con streaming en vivo
+    log.info(f"[{task.task_id}] Launching Claude Code CLI with stream...")
+    stream_res = _run_claude_cli_streaming(enhanced, task.chat_id, task.task_id)
+    raw_output = stream_res.get("final_text", "") or stream_res.get("stdout_raw", "")
+    errors.extend(stream_res.get("errors", []))
 
     # Detect files modified via git diff
     try:
