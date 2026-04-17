@@ -5,7 +5,7 @@ import logging
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from modules.ssh_executor import execute_ssh_command
+from modules.ssh import execute as execute_ssh_command
 
 log = logging.getLogger(__name__)
 

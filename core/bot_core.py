@@ -2155,7 +2155,7 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
 
                     elif block.name == "vps_exec":
                         try:
-                            from modules.ssh_executor import execute_ssh_command
+                            from modules.ssh import execute as execute_ssh_command
                             cmd     = block.input["command"]
                             timeout = block.input.get("timeout", 30)
                             log.info(f"[{chat_id}] VPS exec: {cmd[:80]}")
@@ -2175,7 +2175,7 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
 
                     elif block.name == "vps_leer_archivo":
                         try:
-                            from modules.ssh_executor import read_file_sftp
+                            from modules.ssh import read_file as read_file_sftp
                             path = block.input["path"]
                             log.info(f"[{chat_id}] VPS leer: {path}")
                             res = read_file_sftp(path)
@@ -2190,7 +2190,7 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
 
                     elif block.name == "vps_escribir_archivo":
                         try:
-                            from modules.ssh_executor import write_file_sftp
+                            from modules.ssh import write_file as write_file_sftp
                             path    = block.input["path"]
                             content = block.input["content"]
                             log.info(f"[{chat_id}] VPS escribir: {path} ({len(content)} chars)")
@@ -2208,7 +2208,7 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
 
                     elif block.name == "vps_docker":
                         try:
-                            from modules.ssh_executor import execute_ssh_command
+                            from modules.ssh import execute as execute_ssh_command
                             action    = block.input["action"]
                             container = block.input.get("container", "")
                             tail      = block.input.get("tail", 50)
