@@ -95,15 +95,24 @@ def classify_complexity(text: str) -> str:
     t = text.lower()
     word_count = len(text.split())
 
+    # Complex: frases y verbos largos. Word boundaries para no matchear substrings.
     complex_signals = [
-        r"anali[zs][aá]", r"compar[aá]", r"redact[aá]", r"elabor[aá]",
-        r"en detalle", r"a fondo", r"completo", r"exhaustivo",
-        r"m[uú]ltiples", r"todos los", r"considera[rn]?",
+        r"\banali[zs][aá]\w*", r"\bcompar[aá]\w*", r"\bredact[aá]\w*", r"\belabor[aá]\w*",
+        r"\ben detalle\b", r"\ba fondo\b", r"\bcompleto\b", r"\bexhaustivo\b",
+        r"\bm[uú]ltiples\b", r"\btodos los\b", r"\bconsidera[rn]?\b", r"\bprofundiz[aá]\w*",
     ]
+    # Simple: interjecciones / confirmaciones breves. Word boundaries obligatorios —
+    # sin ellos 'no' matchea 'no proporcional', 'ok' matchea 'okupa', etc., y una query
+    # compleja cae a Haiku/Sonnet por error. Eso ya nos pasó: usó Sonnet para
+    # reaseguros complejo porque "no proporcional" disparó el pattern "no".
     simple_signals = [
-        r"qu[eé] hora", r"clima", r"temperatura", r"hola", r"gr[aá]cias",
-        r"ok", r"listo", r"dale", r"perfecto", r"sí", r"no",
+        r"\bqu[eé] hora\b", r"\bclima\b", r"\btemperatura\b", r"\bhola\b",
+        r"\bgr[aá]cias\b", r"\bok\b", r"\blisto\b", r"\bdale\b",
+        r"\bperfecto\b", r"\bs[ií]\b",
     ]
+    # Nota: 'no' suelto se removió a propósito — es demasiado ambiguo (matchea
+    # 'no proporcional', 'no se', 'no puedo'). Si querés interpretar 'no' como
+    # confirmación corta, hay que hacerlo a nivel de mensaje entero (len<=3).
 
     if word_count < 8 or any(re.search(p, t) for p in simple_signals):
         return "simple"
