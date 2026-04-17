@@ -29,6 +29,11 @@ WORKER_SECRET = os.environ.get("WORKER_SECRET", "cuki-worker-secret")
 REPO_PATH     = os.environ.get("REPO_PATH", "/home/cukibot/cukinator-bot")
 REPO_REMOTE   = f"https://{GITHUB_TOKEN}@github.com/cuki82/cukinator-bot.git"
 
+# Exclusión mutua: una tarea a la vez sobre el repo. Si llega otra mientras
+# el worker está ocupado, /task responde 409 con el task_id en curso.
+_repo_lock: threading.Lock = threading.Lock()
+_current_task: Optional[dict] = None
+
 class CodingTask(BaseModel):
     task_id: str
     user_text: str
