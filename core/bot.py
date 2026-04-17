@@ -20,7 +20,7 @@ from handlers.astro_handler    import astro_command, cartas_command
 from handlers.vps_handler      import vps_command
 
 # Importar comandos del core
-from bot_core import (
+from core.bot_core import (
     cmd_start, cmd_reset, cmd_voz, cmd_testvoice, cmd_cartas,
     handle_voz_callback, handle_menu_callback, handle_biblioteca_callback,
     handle_confirm_callback,

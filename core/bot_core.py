@@ -14,16 +14,16 @@ from fpdf import FPDF
 from fpdf.enums import XPos, YPos
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, ContextTypes, filters, CallbackQueryHandler
-from swiss_engine import calc_carta_completa, formatear_ficha, verificar_carta, calc_houses, assign_planet_house, formatear_ficha_tecnica, calc_dignidad, calc_estado_dinamico, calc_regentes, calc_intercepciones, calc_jerarquias
-from config_store import init_config_store, seed_initial_configs, save_config, get_config, get_config_meta, list_configs, load_all_active
-from memory_store import (init_memory_store, save_message_full, get_history_full,
+from modules.swiss_engine import calc_carta_completa, formatear_ficha, verificar_carta, calc_houses, assign_planet_house, formatear_ficha_tecnica, calc_dignidad, calc_estado_dinamico, calc_regentes, calc_intercepciones, calc_jerarquias
+from services.config_store import init_config_store, seed_initial_configs, save_config, get_config, get_config_meta, list_configs, load_all_active
+from services.memory_store import (init_memory_store, save_message_full, get_history_full,
     get_sessions, search_memory, search_person_memory, save_memory_fact,
     upsert_person_memory, get_memory_stats, needs_summary, clear_chat_history)
-from reinsurance_kb import (init_reinsurance_kb, search_knowledge, get_document_list,
+from modules.reinsurance_kb import (init_reinsurance_kb, search_knowledge, get_document_list,
     get_kb_stats, create_document, add_chunk, add_concept, add_summary, add_qa,
     chunk_text, build_enrichment_prompt, build_summary_prompt, is_reinsurance_context,
     detect_domain)
-from agent_ops import (init_agent_ops, log_change, get_changelog, get_agent_status,
+from services.agent_ops import (init_agent_ops, log_change, get_changelog, get_agent_status,
     store_secret, list_secrets, register_skill, list_skills, classify_intent)
 
 # ── Configuración ──────────────────────────────────────────────────────────────
