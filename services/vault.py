@@ -98,7 +98,7 @@ def load_all_to_env():
     loaded = 0
     for key, ciphertext in rows:
         try:
-            os.environ[key] = f.decrypt(ciphertext).decode()
+            os.environ.setdefault(key, f.decrypt(ciphertext).decode())
             loaded += 1
         except InvalidToken:
             logger.error(f"Vault: no se pudo desencriptar {key}")
