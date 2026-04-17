@@ -23,6 +23,15 @@ from core.bot_core import (
     ask_claude, save_message_full, send_long_message,
     texto_a_voz, es_respuesta_larga, DB_PATH, OWNER_CHAT_ID
 )
+try:
+    from agents.intent_router import classify as _classify_intent
+    from agents.worker_client import send_coding_task, format_worker_result
+    _WORKER_ENABLED = True
+except ImportError:
+    _WORKER_ENABLED = False
+    def _classify_intent(t): return "conversational"
+    def format_worker_result(r): return r.get("summary", "")
+    async def send_coding_task(t, c): return {"status": "error", "summary": "Worker no disponible"}
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -46,6 +55,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+
+    # Routing: coding intent -> agent_worker en el VPS
+    if _WORKER_ENABLED and _classify_intent(user_msg) == "coding":
+        await update.message.reply_text("Entendido, lo proceso con el Agent Worker en el VPS...")
+        try:
+            result = await send_coding_task(user_msg, chat_id)
+            reply_text = format_worker_result(result)
+            save_message_full(chat_id, "user", user_msg, db_path=DB_PATH)
+            save_message_full(chat_id, "assistant", reply_text, db_path=DB_PATH)
+            await send_long_message(context.bot, chat_id, reply_text, reply_to=update.message)
+        except Exception as e:
+            log.error(f"worker_client error: {e}")
+            await update.message.reply_text(f"Error con el Agent Worker: {e}")
+        return
 
     try:
         q = queue.Queue()
