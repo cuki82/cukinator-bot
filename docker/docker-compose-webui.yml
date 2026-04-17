@@ -1,0 +1,36 @@
+version: "3.9"
+
+services:
+  litellm:
+    image: ghcr.io/berriai/litellm:main-latest
+    container_name: cuki-litellm
+    restart: unless-stopped
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./litellm_config.yaml:/app/config.yaml:ro
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_KEY}
+      LITELLM_MASTER_KEY: ${LITELLM_KEY:-cuki-litellm-secret}
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: cuki-webui
+    restart: unless-stopped
+    ports:
+      - "8181:8080"
+    volumes:
+      - open-webui-data:/app/backend/data
+    environment:
+      OPENAI_API_BASE_URL: "http://litellm:4000/v1"
+      OPENAI_API_KEY: ${LITELLM_KEY:-cuki-litellm-secret}
+      WEBUI_SECRET_KEY: ${WEBUI_SECRET:-cuki-webui-secret}
+      ENABLE_SIGNUP: "false"
+      DEFAULT_USER_ROLE: "user"
+      WEBUI_NAME: "Cukinator Dev Console"
+    depends_on:
+      - litellm
+
+volumes:
+  open-webui-data:
