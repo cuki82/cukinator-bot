@@ -11,6 +11,11 @@ except Exception as _ve:
     pass  # fallback to env vars
 
 import anthropic
+try:
+    import openai
+    _HAS_OPENAI = True
+except ImportError:
+    _HAS_OPENAI = False
 from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel
 
@@ -23,14 +28,6 @@ GITHUB_TOKEN  = os.environ.get("GITHUB_TOKEN", "")
 WORKER_SECRET = os.environ.get("WORKER_SECRET", "cuki-worker-secret")
 REPO_PATH     = os.environ.get("REPO_PATH", "/home/cukibot/cukinator-bot")
 REPO_REMOTE   = f"https://{GITHUB_TOKEN}@github.com/cuki82/cukinator-bot.git"
-
-def _get_client():
-    key = os.environ.get("ANTHROPIC_KEY", ANTHROPIC_KEY)
-    return anthropic.Anthropic(api_key=key)
-_repo_lock = threading.Lock()
-_current_task = None
-PROTECTED_FILES = ["core/bot.py", "core/bot_core.py", "Dockerfile", "requirements.txt"]
-
 
 class CodingTask(BaseModel):
     task_id: str
@@ -115,137 +112,125 @@ def run_tests():
     return {"passed": "SYNTAX_OK" in r["stdout"], "output": (r["stdout"] + r["stderr"])[:2000]}
 
 
-
-WORKER_TOOLS = [
-    {"name": "bash_exec", "description": "Ejecuta comando bash en el repo.",
-     "input_schema": {"type": "object", "properties": {"command": {"type": "string"}, "timeout": {"type": "integer"}}, "required": ["command"]}},
-    {"name": "read_file", "description": "Lee archivo del repo. Usar SIEMPRE antes de modificar.",
-     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}},
-    {"name": "write_file", "description": "Escribe archivo. Core files bloqueados automaticamente.",
-     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}},
-    {"name": "git_status", "description": "Estado del repo.",
-     "input_schema": {"type": "object", "properties": {}}},
-    {"name": "git_commit_push", "description": "Commit y push directo a main.",
-     "input_schema": {"type": "object", "properties": {"message": {"type": "string"}}, "required": ["message"]}},
-    {"name": "run_tests", "description": "Valida sintaxis Python. Usar siempre antes de commit.",
-     "input_schema": {"type": "object", "properties": {}}}
-]
-
-WORKER_SYSTEM = (
-    "Sos el Operational Agent de Cukinator. Ejecutas tareas de codigo sobre el repo del bot.\n\n"
-    "REGLAS:\n"
-    "1. SIEMPRE lee un archivo antes de modificarlo.\n"
-    "2. SIEMPRE corre run_tests antes del commit.\n"
-    "3. core/bot.py, core/bot_core.py, Dockerfile, requirements.txt NO pueden modificarse.\n"
-    "4. Push directo a main - no hay branches ni PRs.\n\n"
-    "FLUJO: git_status > read_file > write_file > run_tests > git_commit_push\n\n"
-    "Responde en espanol rioplatense."
-)
+def _codex_client():
+    if not _HAS_OPENAI:
+        return None
+    key = os.environ.get("OPENAI_API_KEY") or os.environ.get("OPENAI_KEY", "")
+    if not key:
+        return None
+    return openai.OpenAI(api_key=key)
 
 
-def dispatch_tool(name, inputs):
-    if name == "bash_exec":
-        r = bash_exec(inputs["command"], timeout=inputs.get("timeout", 60))
-        return f"stdout: {r['stdout']}\nstderr: {r['stderr']}\ncode: {r['returncode']}"
-    elif name == "read_file":
-        r = read_file(inputs["path"])
-        if r["success"]:
-            return f"[{inputs['path']} - {r['lines']} lineas]\n{r['content']}"
-        return f"Error: {r.get('error')}"
-    elif name == "write_file":
-        r = write_file(inputs["path"], inputs["content"])
-        if r["success"]:
-            return f"Escrito: {r['path']} ({r['bytes']} bytes)"
-        return f"Error: {r.get('error')}"
-    elif name == "git_status":
-        return git_status()["output"]
-    elif name == "git_commit_push":
-        r = git_commit_push(inputs["message"])
-        if r["success"]:
-            return f"OK\nArchivos: {r.get('modified')}\nCommit: {r.get('commit')}"
-        return f"Error: {r.get('error')}"
-    elif name == "run_tests":
-        r = run_tests()
-        return f"{'PASS' if r['passed'] else 'FAIL'}\n{r['output']}"
-    return f"Tool desconocido: {name}"
+CODEX_MODEL = os.environ.get("CODEX_MODEL", "gpt-5-codex")
 
+
+def codex_plan(user_text: str) -> str:
+    """Codex transforma el mensaje del usuario en un prompt detallado para Claude."""
+    client = _codex_client()
+    if not client:
+        return user_text
+    try:
+        system = "Sos un prompt engineer experto en tareas DevOps/coding sobre un bot Python. El usuario manda una descripcion informal. Convertila en un prompt tecnico detallado para un agente ejecutor (Claude) que tiene estos tools: bash_exec, read_file, write_file, git_status, git_commit_push, run_tests. El prompt debe incluir: objetivo claro, archivos relevantes a leer, pasos concretos, criterio de exito. Respondeme SOLO con el prompt final en espanol rioplatense, sin preambulos."
+        r = client.chat.completions.create(
+            model=CODEX_MODEL, max_tokens=800,
+            messages=[{"role": "system", "content": system}, {"role": "user", "content": user_text}]
+        )
+        plan = r.choices[0].message.content.strip()
+        log.info(f"[codex_plan] {len(plan)} chars")
+        return plan
+    except Exception as e:
+        log.error(f"codex_plan error: {e}")
+        return user_text
+
+
+def codex_summarize(user_text: str, raw_summary: str, modified_files: list, git_info: dict) -> str:
+    """Codex formatea el resultado de Claude para el usuario."""
+    client = _codex_client()
+    if not client:
+        return raw_summary
+    try:
+        context = f"Pedido: {user_text}" + chr(10)*2 + f"Resultado tecnico: {raw_summary}" + chr(10)
+        if modified_files:
+            context += f"Archivos modificados: {modified_files}" + chr(10)
+        if git_info.get("commit"):
+            context += f"Git: {git_info['commit']}" + chr(10)
+        system = "Sos un formateador de respuestas tecnicas para Telegram (rioplatense). Recibis el pedido original + resultado tecnico de un agente. Genera una respuesta clara, concisa, con markdown basico (bullets, bold). Maximo 1500 caracteres. Sin preambulos. Arranca directo con lo relevante."
+        r = client.chat.completions.create(
+            model=CODEX_MODEL, max_tokens=600,
+            messages=[{"role": "system", "content": system}, {"role": "user", "content": context}]
+        )
+        return r.choices[0].message.content.strip()
+    except Exception as e:
+        log.error(f"codex_summarize error: {e}")
+        return raw_summary
 
 
 def run_agent(task):
+    """Pipeline: Codex planner -> Claude Code CLI executor -> Codex summarizer."""
     start = time.time()
     modified_files, git_info, errors = [], {}, []
-    messages = [{"role": "user", "content": f"Tarea: {task.user_text}"}]
 
-    for i in range(15):
-        log.info(f"[{task.task_id}] iter {i+1}")
-        try:
-            resp = _get_client().messages.create(
-                model="claude-opus-4-5", max_tokens=4096,
-                system=WORKER_SYSTEM, tools=WORKER_TOOLS, messages=messages
-            )
-        except Exception as e:
-            errors.append(str(e))
-            return WorkerResult(task_id=task.task_id, status="error",
-                                summary=f"Error API: {e}", errors=errors, duration_s=time.time()-start)
+    log.info(f"[{task.task_id}] codex_plan: building prompt...")
+    enhanced = codex_plan(task.user_text)
+    log.info(f"[{task.task_id}] codex_plan OK ({len(enhanced)} chars)")
 
-        if resp.stop_reason == "tool_use":
-            messages.append({"role": "assistant", "content": resp.content})
-            tool_results = []
-            for blk in resp.content:
-                if blk.type == "tool_use":
-                    log.info(f"[{task.task_id}] tool={blk.name}")
-                    result = dispatch_tool(blk.name, blk.input)
-                    if blk.name == "write_file" and "Escrito:" in result:
-                        modified_files.append(blk.input.get("path", ""))
-                    elif blk.name == "git_commit_push" and "OK" in result:
-                        git_info["commit"] = result
-                    tool_results.append({"type": "tool_result", "tool_use_id": blk.id, "content": result})
-            messages.append({"role": "user", "content": tool_results})
-        else:
-            parts = [b.text for b in resp.content if hasattr(b, "text") and b.text.strip()]
-            return WorkerResult(task_id=task.task_id, status="ok",
-                                summary="\n".join(parts) or "Listo.",
-                                modified_files=modified_files, git_info=git_info,
-                                errors=errors, duration_s=round(time.time()-start, 1))
+    # Ensure claude CLI has access to the Anthropic key
+    env = dict(os.environ)
+    ak = os.environ.get("ANTHROPIC_KEY") or os.environ.get("ANTHROPIC_API_KEY", "")
+    if ak:
+        env["ANTHROPIC_API_KEY"] = ak
 
-    return WorkerResult(task_id=task.task_id, status="partial", summary="Limite de iteraciones.",
-                        modified_files=modified_files, git_info=git_info,
-                        duration_s=round(time.time()-start, 1))
-
-
-@app.get("/health")
-def health():
-    return {"status": "ok", "repo": REPO_PATH, "repo_exists": Path(REPO_PATH).exists()}
-
-
-@app.post("/task", response_model=WorkerResult)
-def execute_task(task: CodingTask, x_worker_secret: str = Header(None)):
-    if x_worker_secret != WORKER_SECRET:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    global _current_task
-    if not _repo_lock.acquire(blocking=False):
-        raise HTTPException(status_code=409, detail=f"Worker ocupado: {_current_task}")
-    _current_task = {"task_id": task.task_id, "started_at": time.time()}
+    log.info(f"[{task.task_id}] Launching Claude Code CLI...")
     try:
-        if Path(REPO_PATH).exists():
-            bash_exec("git fetch origin && git checkout main && git pull origin main")
-        else:
-            bash_exec(f"git clone {REPO_REMOTE} {REPO_PATH}", cwd="/home/cukibot")
-        return run_agent(task)
-    finally:
-        _repo_lock.release()
-        _current_task = None
+        proc = subprocess.run(
+            ["claude", "-p", enhanced, "--dangerously-skip-permissions"],
+            capture_output=True, text=True, timeout=600,
+            cwd=REPO_PATH, env=env
+        )
+        raw_output = proc.stdout
+        raw_err = proc.stderr
+        log.info(f"[{task.task_id}] Claude Code done, rc={proc.returncode}, stdout={len(raw_output)} chars")
+        if proc.returncode != 0:
+            errors.append(f"claude CLI rc={proc.returncode}: {raw_err[:500]}")
+    except subprocess.TimeoutExpired:
+        errors.append("claude CLI timeout (600s)")
+        raw_output = ""
+    except FileNotFoundError:
+        errors.append("claude CLI no encontrado en PATH")
+        raw_output = ""
+    except Exception as e:
+        errors.append(f"claude CLI error: {e}")
+        raw_output = ""
+
+    # Detect files modified via git diff
+    try:
+        diff_result = subprocess.run(
+            ["git", "diff", "--name-only", "HEAD"],
+            capture_output=True, text=True, timeout=10, cwd=REPO_PATH
+        )
+        if diff_result.stdout.strip():
+            modified_files = diff_result.stdout.strip().splitlines()
+        # Latest commit info
+        log_result = subprocess.run(
+            ["git", "log", "--oneline", "-1"],
+            capture_output=True, text=True, timeout=10, cwd=REPO_PATH
+        )
+        if log_result.stdout:
+            git_info["commit"] = log_result.stdout.strip()
+    except Exception as e:
+        log.warning(f"git status check failed: {e}")
+
+    log.info(f"[{task.task_id}] codex_summarize...")
+    final_summary = codex_summarize(task.user_text, raw_output or "(sin output)", modified_files, git_info)
+
+    return WorkerResult(
+        task_id=task.task_id,
+        status="ok" if not errors else ("partial" if raw_output else "error"),
+        summary=final_summary,
+        modified_files=modified_files,
+        git_info=git_info,
+        errors=errors,
+        duration_s=round(time.time() - start, 1)
+    )
 
 
-@app.get("/status")
-def worker_status():
-    occ = not _repo_lock.acquire(blocking=False)
-    if not occ:
-        _repo_lock.release()
-    return {"available": not occ, "current_task": _current_task,
-            "repo_path": REPO_PATH, "repo_exists": Path(REPO_PATH).exists()}
-
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=3335, log_level="info")
