@@ -9,5 +9,5 @@ async def astro_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cartas_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Importar del core en runtime para evitar circular imports
-    from bot_core import menu_lista_cartas
+    from core.bot_core import menu_lista_cartas
     await menu_lista_cartas(update, context, update.effective_chat.id)

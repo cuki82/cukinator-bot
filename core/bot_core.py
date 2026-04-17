@@ -1524,8 +1524,6 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
                             branch  = block.input.get("branch", "bot-changes")
 
                             # Push directo a main habilitado
-                            if branch == "main":
-
                             # Archivos core protegidos
                             PROTECTED = ("bot.py", "bot_core.py", "handlers/message_handler.py",
                                          "handlers/callback_handler.py", "handlers/vps_handler.py",

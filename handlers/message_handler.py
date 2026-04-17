@@ -19,7 +19,7 @@ from telegram.ext import ContextTypes
 log = logging.getLogger(__name__)
 
 # Importar core desde el módulo principal
-from bot_core import (
+from core.bot_core import (
     ask_claude, save_message_full, send_long_message,
     texto_a_voz, es_respuesta_larga, DB_PATH, OWNER_CHAT_ID
 )
@@ -324,7 +324,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
         import queue, threading
-        from bot_core import ask_claude, save_message_full, send_long_message, DB_PATH
+        from core.bot_core import ask_claude, save_message_full, send_long_message, DB_PATH
 
         q = queue.Queue()
         def run_claude():
@@ -390,7 +390,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Llamar a Claude con visión directamente
         import queue, threading
-        from bot_core import claude, get_system_prompt, save_message_full, send_long_message, DB_PATH
+        from core.bot_core import claude, get_system_prompt, save_message_full, send_long_message, DB_PATH
 
         q = queue.Queue()
 
