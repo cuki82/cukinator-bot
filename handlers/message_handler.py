@@ -215,11 +215,26 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log.info(f"[{chat_id}] Transcripcion: {texto}")
         await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
+        # Detectar si el usuario pidió explicitamente respuesta en audio.
+        # Default: audio in -> texto out. Solo si hay una frase explícita
+        # tipo "respondeme con audio", "hablame", etc., activamos la voz.
+        import re as _re
+        _VOICE_REQUEST_PATTERNS = [
+            r"\brespond[eé]me (?:con|en) (?:un )?(?:audio|voz)\b",
+            r"\bcontest[aá]me (?:con|en) (?:un )?(?:audio|voz)\b",
+            r"\bmand[aá]me (?:un )?(?:audio|voz)\b",
+            r"\b(?:respond[eé]|contest[aá]) (?:con|en) (?:audio|voz)\b",
+            r"\bhabl[aá]me\b", r"\bescuch[aá]me\b",
+            r"\ben audio\b", r"\bcon voz\b",
+        ]
+        _pidio_audio = any(_re.search(p, (texto or "").lower()) for p in _VOICE_REQUEST_PATTERNS)
+        log.info(f"[{chat_id}] pidio_audio={_pidio_audio}")
+
         q = queue.Queue()
 
         def run_claude():
             try:
-                q.put(("ok", ask_claude(chat_id, texto, user_name=name, allow_voice=True)))
+                q.put(("ok", ask_claude(chat_id, texto, user_name=name, allow_voice=_pidio_audio)))
             except Exception as e:
                 q.put(("err", str(e)))
 
@@ -250,7 +265,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_message_full(chat_id, "assistant", reply, db_path=DB_PATH)
 
         tiene_voz = any(cap == "voice" for _, _, cap in extra_files)
-        if not tiene_voz and reply and not es_respuesta_larga(reply):
+        if _pidio_audio and not tiene_voz and reply and not es_respuesta_larga(reply):
             ogg_path = texto_a_voz(reply)
             if ogg_path:
                 with open(ogg_path, "rb") as f:
@@ -258,6 +273,8 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 os.unlink(ogg_path)
                 tiene_voz = True
 
+        # Siempre mandar texto también (excepto si ya se generó audio por
+        # pedido explícito — en ese caso solo audio, como tenés programado).
         if not tiene_voz:
             await send_long_message(context.bot, chat_id, reply, reply_to=update.message)
 
