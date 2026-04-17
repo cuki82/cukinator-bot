@@ -40,6 +40,10 @@ from core.bot_core import (
 logging.basicConfig(format="%(asctime)s [%(levelname)s] %(message)s", level=logging.INFO)
 
 if __name__ == "__main__":
+    if os.environ.get("DISABLE_BOT", "").lower() in ("true", "1"):
+        import time
+        log.info("DISABLE_BOT=true — Railway standby. Bot en espera.")
+        while True: time.sleep(3600)
     init_db()
     log.info("🤖 CukinatorBot iniciando (arquitectura modular)...")
 
