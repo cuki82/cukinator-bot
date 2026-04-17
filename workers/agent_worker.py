@@ -234,3 +234,63 @@ def run_agent(task):
     )
 
 
+
+
+# ── FastAPI routes ──────────────────────────────────────────────────────────
+
+@app.get("/health")
+def health():
+    return {
+        "status": "ok",
+        "repo": REPO_PATH,
+        "repo_exists": os.path.exists(REPO_PATH),
+        "architecture": "Codex(planner) + ClaudeCode(executor) + Codex(summarizer)",
+        "codex_available": _HAS_OPENAI and bool(os.environ.get("OPENAI_API_KEY")),
+    }
+
+
+@app.post("/task", response_model=WorkerResult)
+def execute_task(task: CodingTask, x_worker_secret: str = Header(None)):
+    if x_worker_secret != WORKER_SECRET:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    global _current_task
+    if not _repo_lock.acquire(blocking=False):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Worker ocupado: {_current_task}"
+        )
+    _current_task = {"task_id": task.task_id, "started_at": time.time()}
+    try:
+        if os.path.exists(REPO_PATH):
+            subprocess.run(
+                "git fetch origin && git checkout main && git pull origin main",
+                shell=True, cwd=REPO_PATH, timeout=30, capture_output=True
+            )
+        else:
+            subprocess.run(
+                f"git clone {REPO_REMOTE} {REPO_PATH}",
+                shell=True, cwd="/home/cukibot", timeout=120, capture_output=True
+            )
+        return run_agent(task)
+    finally:
+        _repo_lock.release()
+        _current_task = None
+
+
+@app.get("/status")
+def worker_status():
+    occ = not _repo_lock.acquire(blocking=False)
+    if not occ:
+        _repo_lock.release()
+    return {
+        "available": not occ,
+        "current_task": _current_task,
+        "repo_path": REPO_PATH,
+        "repo_exists": os.path.exists(REPO_PATH),
+    }
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=3335, log_level="info")
