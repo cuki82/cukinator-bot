@@ -41,7 +41,7 @@ from core.bot_core import (
 logging.basicConfig(format="%(asctime)s [%(levelname)s] %(message)s", level=logging.INFO)
 
 if __name__ == "__main__":
-    _on_railway = bool(os.environ.get("RAILWAY_ENVIRONMENT_NAME") or os.environ.get("RAILWAY_PROJECT_ID"))
+    _on_railway = bool(os.environ.get("RAILWAY_REPLICA_ID") or os.environ.get("RAILWAY_DEPLOYMENT_ID"))
     _disabled = os.environ.get("DISABLE_BOT", "").lower() in ("true", "1")
     if _on_railway or _disabled:
         import http.server, threading
