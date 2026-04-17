@@ -41,9 +41,10 @@ logging.basicConfig(format="%(asctime)s [%(levelname)s] %(message)s", level=logg
 
 if __name__ == "__main__":
     if os.environ.get("DISABLE_BOT", "").lower() in ("true", "1"):
-        import time
-        log.info("DISABLE_BOT=true — Railway standby. Bot en espera.")
-        while True: time.sleep(3600)
+        import uvicorn
+        from workers.agent_worker import app as worker_app
+        log.info("DISABLE_BOT=true — Railway standby. Corriendo agent_worker en :3335")
+        uvicorn.run(worker_app, host="0.0.0.0", port=int(os.environ.get("PORT", "3335")), log_level="info")
     init_db()
     log.info("🤖 CukinatorBot iniciando (arquitectura modular)...")
 

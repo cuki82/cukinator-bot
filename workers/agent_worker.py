@@ -1,6 +1,15 @@
-import os, subprocess, logging, time, threading
+import os, sys, subprocess, logging, time, threading
 from pathlib import Path
 from typing import Optional
+
+# Load vault secrets before any API client initialization
+try:
+    sys.path.insert(0, os.environ.get("REPO_PATH", "/home/cukibot/cukinator-bot"))
+    from services.vault import load_all_to_env
+    load_all_to_env()
+except Exception as _ve:
+    pass  # fallback to env vars
+
 import anthropic
 from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel
@@ -15,7 +24,9 @@ WORKER_SECRET = os.environ.get("WORKER_SECRET", "cuki-worker-secret")
 REPO_PATH     = os.environ.get("REPO_PATH", "/home/cukibot/cukinator-bot")
 REPO_REMOTE   = f"https://{GITHUB_TOKEN}@github.com/cuki82/cukinator-bot.git"
 
-client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+def _get_client():
+    key = os.environ.get("ANTHROPIC_KEY", ANTHROPIC_KEY)
+    return anthropic.Anthropic(api_key=key)
 _repo_lock = threading.Lock()
 _current_task = None
 PROTECTED_FILES = ["core/bot.py", "core/bot_core.py", "Dockerfile", "requirements.txt"]
@@ -168,7 +179,7 @@ def run_agent(task):
     for i in range(15):
         log.info(f"[{task.task_id}] iter {i+1}")
         try:
-            resp = client.messages.create(
+            resp = _get_client().messages.create(
                 model="claude-opus-4-5", max_tokens=4096,
                 system=WORKER_SYSTEM, tools=WORKER_TOOLS, messages=messages
             )
