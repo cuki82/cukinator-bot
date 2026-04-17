@@ -63,7 +63,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             result = await send_coding_task(user_msg, chat_id)
             reply_text = format_worker_result(result)
             if os.environ.get("BOT_TRACE", "").lower() in ("true", "1"):
-                elapsed = result.get("elapsed_seconds") or result.get("duration") or "?"
+                # El worker devuelve duration_s (float); fallback a otros nombres por compat
+                elapsed = result.get("duration_s") or result.get("elapsed_seconds") or result.get("duration") or "?"
                 status  = result.get("status", "?")
                 model_hint = result.get("model") or "codex+claude-code-cli"
                 reply_text += (
