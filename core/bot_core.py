@@ -1505,6 +1505,17 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
     _model  = _select_model(user_text, _intent)
     log.info(f"[{chat_id}] model={_model} intent={_intent}")
 
+    # RAG: inyectar contexto de KB para intent reinsurance
+    if _intent == "reinsurance":
+        try:
+            from modules.rag_kb import build_context
+            _rag_ctx = build_context(user_text, top_k=4)
+            if _rag_ctx:
+                messages = [{"role": "user", "content": _rag_ctx + chr(10)*2 + user_text}]
+                log.info(f"[{chat_id}] RAG context injected ({len(_rag_ctx)} chars)")
+        except Exception as _re:
+            log.debug(f"RAG skip: {_re}")
+
     while iteration < max_iterations:
         iteration += 1
         response = claude.messages.create(

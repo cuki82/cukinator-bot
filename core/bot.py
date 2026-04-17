@@ -28,6 +28,7 @@ from handlers.gmail_handler    import gmail_command
 from handlers.calendar_handler import calendar_command
 from handlers.astro_handler    import astro_command, cartas_command
 from handlers.vps_handler      import vps_command
+from handlers.kb_handler       import cmd_kb
 
 # Importar comandos del core
 from core.bot_core import (
@@ -64,6 +65,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("calendar",  calendar_command))
     app.add_handler(CommandHandler("astro",     astro_command))
     app.add_handler(CommandHandler("vps",       vps_command))
+    app.add_handler(CommandHandler("kb",        cmd_kb))
 
     # Callbacks inline
     app.add_handler(CallbackQueryHandler(handle_confirm_callback,      pattern="^confirm:"))
