@@ -1,0 +1,17 @@
+[Unit]
+Description=Cukinator MCP Server (FastMCP :3350)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/cukibot/cukinator-bot/mcp
+Environment=DB_PATH=/home/cukibot/data/memory.db
+Environment=MASTER_KEY=3vPeFgOxPAe7MuS_tkCo_VphyYSniWynkCd7ViIxyRM=
+Environment=PATH=/home/cukibot/.local/bin:/usr/bin:/bin
+Environment=PORT=3350
+ExecStart=/usr/bin/python3 -m uvicorn mcp_server:app --host 0.0.0.0 --port 3350
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
