@@ -11,12 +11,27 @@ log = logging.getLogger(__name__)
 
 _PATTERNS = {
     "coding": [
+        # Modificaciones de codigo
         r"modific[aá] el bot", r"cambi[aá] el c[oó]digo", r"edit[aá] el archivo",
         r"nuevo m[oó]dulo", r"nueva funci[oó]n", r"nuevo handler", r"nuevo tool",
         r"push a github", r"hac[eé] un commit", r"abr[ií] un pr", r"pull request",
         r"refactoriz[aá]", r"reescrib[ií]", r"agregá? un tool", r"agregá? un handler",
         r"cambi[aá] el system prompt", r"modific[aá] bot_core", r"nueva integraci[oó]n al bot",
-        r"deploy", r"dockerfile", r"requirements\.txt",
+        r"deploy", r"dockerfile", r"requirements\.txt", r"github",
+        # DevOps / VPS / servidor
+        r"entra[rn]? al servidor", r"accede[rn]? al vps", r"conect[aá]te al",
+        r"fijate en el vps", r"ver[ií]? en el servidor", r"chequea[rn]? el vps",
+        r"corr[eé] en el vps", r"ejecut[aá] en el (?:vps|servidor)",
+        r"ssh", r"docker", r"systemctl", r"systemd", r"container(?:es)?",
+        r"reinicia[rn]? (?:el )?(?:bot|servicio|worker|container)",
+        r"restart (?:bot|service|worker|container)",
+        r"ver logs?", r"mostr[aá] logs?", r"journalctl", r"tail -f",
+        r"estado del (?:vps|servidor|bot)", r"status del", r"uptime",
+        r"instal[aá] (?:en|el)", r"instal[aá]r (?:en|el)",
+        r"configur[aá] el", r"\.service", r"nginx", r"uvicorn",
+        r"agent.?worker", r"worker del bot",
+        r"arrancar? (?:el )?(?:servicio|worker|bot)",
+        r"parar? (?:el )?(?:servicio|worker|bot)",
     ],
     "research": [
         r"busca[rn]?", r"investiga[rn]?", r"encontr[aá]", r"qu[eé] dice", r"qu[eé] es",
@@ -40,8 +55,6 @@ _PATTERNS = {
         r"recorda[rn]?", r"guard[aá]", r"mi preferencia", r"mis datos",
         r"cu[aá]ndo dije", r"qu[eé] dijiste", r"mi historial", r"acord[aá]te",
         r"anot[aá]", r"mi perfil", r"mis contactos", r"agenda personal",
-    ],
-    "coding": [  # duplicado intencionalmente — se fusiona abajo
     ],
 }
 
