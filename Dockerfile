@@ -18,13 +18,16 @@ RUN pip install --no-cache-dir anthropic==0.94.0
 RUN pip install --no-cache-dir fpdf2==2.8.7 geopy==2.4.1 timezonefinder==8.2.2
 RUN pip install --no-cache-dir requests==2.32.5 pytz==2026.1.post1 httpx==0.27.2
 RUN pip install --no-cache-dir gTTS==2.5.4 yt-dlp==2026.3.17 paramiko==3.5.0 pypdf==4.3.1
+RUN pip install --no-cache-dir cryptography==44.0.2
+RUN pip install --no-cache-dir fastapi==0.115.12 uvicorn==0.34.2 pydantic==2.11.3
 
 RUN mkdir -p /data
 
-COPY bot.py bot_core.py transcribe.py ./
-COPY swiss_engine.py memory_store.py config_store.py reinsurance_kb.py agent_ops.py ./
-COPY handlers/ ./handlers/
-COPY modules/ ./modules/
+COPY core/       ./core/
+COPY agents/     ./agents/
+COPY handlers/   ./handlers/
+COPY services/   ./services/
+COPY modules/    ./modules/
+COPY workers/    ./workers/
 
-CMD ["python", "bot.py"]
-# cache-bust: 20260416_2025
+CMD ["python", "core/bot.py"]
