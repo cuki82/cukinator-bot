@@ -185,8 +185,10 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         log.info(f"[{chat_id}] Transcribiendo audio de {name}...")
         loop = asyncio.get_event_loop()
-        _bot_dir = os.path.dirname(os.path.abspath(__file__ + "/.."))
-        _transcribe_script = os.path.join(_bot_dir, "transcribe.py")
+        # transcribe.py vive en core/ desde la restructura Silicon Valley.
+        # Resolvemos el path desde la ubicación de este handler (handlers/ -> ../core/).
+        from pathlib import Path as _Path
+        _transcribe_script = str(_Path(__file__).resolve().parent.parent / "core" / "transcribe.py")
 
         try:
             proc = await asyncio.create_subprocess_exec(
