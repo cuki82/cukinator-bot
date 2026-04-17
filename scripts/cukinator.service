@@ -1,0 +1,19 @@
+[Unit]
+Description=CukinatorBot Telegram Bot
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cukibot
+WorkingDirectory=/home/cukibot/cukinator-bot
+Environment=DB_PATH=/home/cukibot/data/memory.db
+Environment=MASTER_KEY=3vPeFgOxPAe7MuS_tkCo_VphyYSniWynkCd7ViIxyRM=
+ExecStart=/usr/bin/python3 core/bot.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

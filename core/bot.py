@@ -4,6 +4,16 @@ La lógica de negocio vive en bot_core.py
 Los handlers de Telegram están en handlers/
 """
 import os
+import sys
+
+# Cargar vault antes de cualquier import que use env vars
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+try:
+    from services.vault import load_all_to_env, init
+    init()
+    load_all_to_env()
+except Exception as e:
+    print(f"Vault warning: {e} — usando env vars directas")
 import logging
 from telegram import Update
 from telegram.ext import (
