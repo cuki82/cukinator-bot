@@ -130,8 +130,10 @@ def classify_complexity(text: str) -> str:
     # Complex: frases y verbos largos. Word boundaries para no matchear substrings.
     complex_signals = [
         r"\banali[zs][aá]\w*", r"\bcompar[aá]\w*", r"\bredact[aá]\w*", r"\belabor[aá]\w*",
-        r"\ben detalle\b", r"\ba fondo\b", r"\bcompleto\b", r"\bexhaustivo\b",
-        r"\bm[uú]ltiples\b", r"\btodos los\b", r"\bconsidera[rn]?\b", r"\bprofundiz[aá]\w*",
+        r"\ben detalle\b", r"\ba fondo\b", r"\bcomplet[ao]s?\b", r"\bexhaustiv[ao]s?\b",
+        r"\bm[uú]ltiples\b", r"\btodos los\b", r"\bconsidera[rn]?\b",
+        r"\bprofund\w*",  # profundo, profundamente, profundización, profundizá
+        r"\bdetallad\w*", r"\bintegrad\w*", r"\bintegral\w*",
     ]
     # Simple: interjecciones / confirmaciones breves. Word boundaries obligatorios —
     # sin ellos 'no' matchea 'no proporcional', 'ok' matchea 'okupa', etc., y una query

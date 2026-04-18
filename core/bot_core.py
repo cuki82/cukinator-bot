@@ -3557,7 +3557,9 @@ async def handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     elif data == "menu:astro":
         teclado = InlineKeyboardMarkup([
             [InlineKeyboardButton("Ver mis cartas guardadas", callback_data="menu:act:astro_lista")],
-            [InlineKeyboardButton("Calcular carta natal",     callback_data="menu:act:astro_calc")],
+            [InlineKeyboardButton("🌍 Calcular carta natal",   callback_data="menu:act:astro_calc")],
+            [InlineKeyboardButton("☀️ Calcular retorno solar",  callback_data="menu:act:astro_solar")],
+            [InlineKeyboardButton("🌙 Calcular retorno lunar",  callback_data="menu:act:astro_lunar")],
             [InlineKeyboardButton("Ficha técnica completa",   callback_data="menu:act:astro_ficha")],
             *BACK
         ])
@@ -3620,6 +3622,46 @@ async def handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         elif accion == "astro_calc":
             await query.edit_message_text(
                 "Para calcular una carta natal decime:\nFecha (DD/MM/AAAA), hora (HH:MM) y lugar de nacimiento."
+            )
+            return
+        elif accion == "astro_solar":
+            perfiles = astro_listar(chat_id)
+            if not perfiles:
+                await query.edit_message_text(
+                    "Para calcular tu retorno solar primero necesito tu natal. "
+                    "Decime fecha, hora y lugar de nacimiento."
+                )
+                return
+            botones = [[InlineKeyboardButton(
+                p['nombre'].title(), callback_data=f"astro:fichacapa:solar:{p['nombre']}"
+            )] for p in perfiles]
+            botones.append([InlineKeyboardButton("← Volver", callback_data="menu:astro")])
+            await query.edit_message_text(
+                "☀️ *Retorno Solar* — ¿de quién?\n\n"
+                "_Si viajás fuera del lugar de nacimiento el día del cumpleaños, "
+                "el retorno toma ese lugar. Si no me decís nada, uso el lugar natal._",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(botones),
+            )
+            return
+        elif accion == "astro_lunar":
+            perfiles = astro_listar(chat_id)
+            if not perfiles:
+                await query.edit_message_text(
+                    "Para el retorno lunar primero necesito tu natal. "
+                    "Decime fecha, hora y lugar de nacimiento."
+                )
+                return
+            botones = [[InlineKeyboardButton(
+                p['nombre'].title(), callback_data=f"astro:fichacapa:lunar:{p['nombre']}"
+            )] for p in perfiles]
+            botones.append([InlineKeyboardButton("← Volver", callback_data="menu:astro")])
+            await query.edit_message_text(
+                "🌙 *Retorno Lunar* — ¿de quién?\n\n"
+                "_El retorno lunar del mes se calcula automáticamente desde hoy. "
+                "Podés pedirlo con lugar distinto al natal mencionándolo en un mensaje._",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(botones),
             )
             return
         elif accion == "astro_ficha":
