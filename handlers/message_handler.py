@@ -108,10 +108,118 @@ def _detect_credentials(text: str) -> list:
     return found
 
 
+# ── Confirmación explícita antes de escribir al vault ────────────────────
+# El bot NUNCA escribe una credencial al vault sin que el user apriete un
+# botón de confirmación. Esto evita sobrescribir accidentalmente una key
+# real con un template con placeholder (bug que nos pasó con Supabase) y
+# evita que el bot actúe sobre un mensaje de prompt injection que incluya
+# una API key disfrazada.
+#
+# Flujo:
+#   1. user pega credencial → detectamos → guardamos pending en memoria
+#   2. bot responde con botones: ✅ Guardar · ❌ Cancelar
+#   3. user toca Guardar → ahí escribimos al vault (con backup de la anterior)
+#   4. timeout 5 min sin confirmar → se borra el pending
+
+import time as _time
+import uuid as _uuid
+import threading as _threading
+
+_PENDING_CREDS: dict = {}
+_PENDING_LOCK = _threading.Lock()
+_PENDING_TTL_SECS = 300  # 5 minutos
+
+
+def _pending_cleanup():
+    """Borra pendings expirados. Llamado oportunísticamente."""
+    now = _time.time()
+    with _PENDING_LOCK:
+        expired = [k for k, v in _PENDING_CREDS.items() if now - v["ts"] > _PENDING_TTL_SECS]
+        for k in expired:
+            del _PENDING_CREDS[k]
+
+
+def _pending_create(creds: list, chat_id: int) -> str:
+    """Guarda un set de credenciales como 'pendientes de confirmación'.
+    Retorna el ID del pending (corto, para usar en callback_data)."""
+    _pending_cleanup()
+    pid = _uuid.uuid4().hex[:10]
+    with _PENDING_LOCK:
+        _PENDING_CREDS[pid] = {"creds": creds, "chat_id": chat_id, "ts": _time.time()}
+    return pid
+
+
+def _pending_consume(pid: str, chat_id: int):
+    """Saca un pending por ID. Verifica que sea del mismo chat_id (seguridad)."""
+    with _PENDING_LOCK:
+        entry = _PENDING_CREDS.pop(pid, None)
+    if not entry:
+        return None
+    if entry["chat_id"] != chat_id:
+        return None
+    if _time.time() - entry["ts"] > _PENDING_TTL_SECS:
+        return None
+    return entry["creds"]
+
+
+async def handle_vault_callback(update, context):
+    """Callback handler para los botones ✅/❌ del vault. Pattern: vault:<action>:<pid>"""
+    q = update.callback_query
+    await q.answer()
+    parts = (q.data or "").split(":", 2)
+    if len(parts) < 3:
+        return
+    _, action, pid = parts
+    chat_id = q.message.chat.id if q.message else None
+
+    if action == "cancel":
+        with _PENDING_LOCK:
+            _PENDING_CREDS.pop(pid, None)
+        await q.edit_message_text("❌ Cancelado. No guardé nada en el vault.")
+        return
+
+    if action == "apply":
+        creds = _pending_consume(pid, chat_id)
+        if not creds:
+            await q.edit_message_text(
+                "⏱️ La confirmación expiró (5 min) o no coincide el chat. "
+                "Reenviá la credencial si querés volver a intentarlo."
+            )
+            return
+        try:
+            from services.vault import set as vault_set, get as vault_get
+        except Exception as e:
+            await q.edit_message_text(f"❌ No pude abrir el vault: {e}")
+            return
+
+        result_lines = []
+        for vault_key, value, service in creds:
+            existing = vault_get(vault_key)
+            try:
+                replaced = False
+                if existing and existing != value:
+                    # Backup de la credencial anterior antes de sobrescribir
+                    ts = int(_time.time())
+                    vault_set(f"{vault_key}_backup_{ts}", existing)
+                    replaced = True
+                vault_set(vault_key, value)
+                tag = "🔄 reemplazó la anterior (backup guardado)" if replaced else "✨ nueva"
+                result_lines.append(f"• *{service}* → `{vault_key}` {tag}")
+                log.info(f"[{chat_id}] vault confirmed: {vault_key} (len={len(value)}, replaced={replaced})")
+            except Exception as e:
+                result_lines.append(f"• *{service}* → ❌ {e}")
+                log.error(f"[{chat_id}] vault set {vault_key} falló: {e}")
+
+        await q.edit_message_text(
+            "✅ *Guardado en el vault del VPS*\n\n" + "\n".join(result_lines) +
+            "\n\n_El próximo restart del bot/worker levanta los nuevos valores._",
+            parse_mode="Markdown",
+        )
+
+
 async def _handle_credential_paste(update, _context, user_msg: str) -> bool:
-    """Si el mensaje contiene API keys, las guarda al vault del VPS y responde.
-    El bot corre en el mismo VPS → escribe directo, sin SSH ni worker ni LLM.
-    Retorna True si consumió el mensaje (el caller debe return)."""
+    """Si el mensaje contiene API keys, muestra confirmación y queda pendiente
+    hasta que el user apriete ✅ Guardar. Retorna True si consumió el mensaje."""
     creds = _detect_credentials(user_msg)
     if not creds:
         # Chequear si el user pegó un template con placeholder sin rellenar
@@ -120,45 +228,50 @@ async def _handle_credential_paste(update, _context, user_msg: str) -> bool:
                 "⚠️ Parece que pegaste un template de connection string con "
                 "`[YOUR-PASSWORD]` (u otro placeholder) sin reemplazar por la "
                 "password real.\n\nReemplazá el placeholder por la password y "
-                "reenviámelo. No guardé nada para no romper el vault.",
+                "reenviámelo. No guardé nada.",
                 parse_mode="Markdown",
             )
             return True
         return False
 
     chat_id = update.effective_chat.id
-    log.info(f"[{chat_id}] Detectadas {len(creds)} credencial(es), guardando al vault")
+    log.info(f"[{chat_id}] Detectadas {len(creds)} credencial(es), esperando confirmación")
 
+    # No guardamos nada todavía — dejamos pending y mostramos botones
     try:
-        from services.vault import set as vault_set
-    except Exception as e:
-        await update.message.reply_text(
-            f"🔐 Detecté {len(creds)} credencial(es) pero no pude abrir el vault: {e}"
-        )
-        return True
+        from services.vault import get as vault_get
+    except Exception:
+        vault_get = lambda k: None
 
-    saved_lines = []
+    preview_lines = []
     for vault_key, value, service in creds:
-        try:
-            vault_set(vault_key, value)
-            saved_lines.append(f"• *{service}* → `{vault_key}` ({_mask_cred(value)})")
-            log.info(f"[{chat_id}] vault: {vault_key} guardada (len={len(value)})")
-        except Exception as e:
-            saved_lines.append(f"• *{service}* → ❌ error: {e}")
-            log.error(f"[{chat_id}] vault set {vault_key} falló: {e}")
+        existing = vault_get(vault_key) if vault_get else None
+        warning = ""
+        if existing and existing != value:
+            warning = f" · ⚠️ *sobrescribe* la actual (backup automático)"
+        elif existing and existing == value:
+            warning = " · ℹ️ idéntica a la actual"
+        preview_lines.append(
+            f"• *{service}* → `{vault_key}`\n  valor: `{_mask_cred(value)}`{warning}"
+        )
 
-    msg = (
-        "🔐 *Credencial detectada y guardada en el vault del VPS*\n\n"
-        + "\n".join(saved_lines)
-        + "\n\n━━━━━━━━━━━━━━━━━━━\n"
-        "🛡️ *Qué hice:*\n"
-        "• Escribí al vault Fernet encriptado (no tocó el LLM, no queda en el history)\n"
-        "• El próximo restart del worker / bot la levanta automáticamente\n\n"
-        "⚠️ *Recomendación:* esta key ya pasó por el chat — **rotala ahora** "
-        "en el dashboard del servicio. Cuando tengas la nueva, pegámela acá "
-        "y se guarda sola, sin vueltas."
+    pid = _pending_create(creds, chat_id)
+
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Guardar", callback_data=f"vault:apply:{pid}"),
+        InlineKeyboardButton("❌ Cancelar", callback_data=f"vault:cancel:{pid}"),
+    ]])
+
+    await update.message.reply_text(
+        "🔐 *Credencial detectada — confirmá antes de guardar*\n\n"
+        + "\n".join(preview_lines) +
+        "\n\n━━━━━━━━━━━━━━━━━━━\n"
+        "🛡️ No escribo al vault sin que toques *Guardar*.\n"
+        "⏱️ La confirmación expira en 5 minutos.",
+        parse_mode="Markdown",
+        reply_markup=keyboard,
     )
-    await update.message.reply_text(msg, parse_mode="Markdown")
     return True
 
 
