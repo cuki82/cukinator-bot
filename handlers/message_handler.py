@@ -379,8 +379,38 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
+    # Context-aware routing: si el bot en su último mensaje estaba pidiendo datos
+    # de nacimiento (fecha/hora/lugar), el follow-up con esos datos se clasifica
+    # como astrology aunque el intent router keyword-based lo diera conversational.
+    classified = _classify_intent(user_msg)
+    try:
+        import re as _re_ctx
+        import sqlite3 as _sl
+        _con_ctx = _sl.connect(DB_PATH)
+        _last_bot_msg = _con_ctx.execute(
+            "SELECT content FROM messages WHERE chat_id=? AND role='assistant' ORDER BY id DESC LIMIT 1",
+            (chat_id,),
+        ).fetchone()
+        _con_ctx.close()
+        if _last_bot_msg and _last_bot_msg[0]:
+            _prev = _last_bot_msg[0].lower()
+            # Detectar señal de follow-up astrológico
+            _astro_trigger = any(k in _prev for k in [
+                "fecha de nacimiento", "datos de nacimiento", "fecha, hora", "fecha hora", "cuándo nació",
+                "cuándo naciste", "dónde naciste", "dónde nació", "pasame los datos",
+                "ficha natal", "perfil astro",
+            ])
+            # Detectar si el user respondió con formato de datos (fecha + eventualmente hora/lugar)
+            _has_date = bool(_re_ctx.search(r"\b\d{1,2}[/\-\s]\d{1,2}[/\-\s]\d{2,4}\b", user_msg)) \
+                or bool(_re_ctx.search(r"\b\d{1,2}\s+de\s+\w+\s+(?:de\s+)?\d{4}\b", user_msg, _re_ctx.IGNORECASE))
+            if _astro_trigger and _has_date and classified == "conversational":
+                classified = "astrology"
+                log.info(f"[{chat_id}] ctx routing: {classified} (bot pidió datos, user respondió con fecha)")
+    except Exception as _ctx_e:
+        log.debug(f"ctx routing skip: {_ctx_e}")
+
     # Routing: coding intent -> agent_worker en el VPS
-    if _WORKER_ENABLED and _classify_intent(user_msg) == "coding":
+    if _WORKER_ENABLED and classified == "coding":
         await update.message.reply_text("Entendido, lo proceso con el Agent Worker en el VPS...")
         try:
             result = await send_coding_task(user_msg, chat_id)

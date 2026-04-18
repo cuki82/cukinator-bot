@@ -205,8 +205,36 @@ def init_db():
     init_reinsurance_kb(DB_PATH)
     init_agent_ops(DB_PATH)
 
+def _astro_use_pg() -> bool:
+    """True si hay Postgres + tabla personal.astro_profiles disponible."""
+    try:
+        from services.db import pg_available
+        return pg_available()
+    except Exception:
+        return False
+
+
 def astro_guardar(chat_id: int, nombre: str, fecha: str, hora: str, lugar: str, carta: dict) -> str:
+    """Guarda/actualiza un perfil astrológico. Postgres (personal.astro_profiles)
+    si está disponible, sino SQLite local como fallback transitorio."""
     import json
+    nombre_n = nombre.strip().lower()
+    if _astro_use_pg():
+        try:
+            from services.db import pg_conn
+            with pg_conn() as con:
+                with con.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO personal.astro_profiles (chat_id, nombre, fecha, hora, lugar, carta_json, updated_at)
+                        VALUES (%s,%s,%s,%s,%s,%s::jsonb, NOW())
+                        ON CONFLICT (chat_id, nombre) DO UPDATE SET
+                            fecha=EXCLUDED.fecha, hora=EXCLUDED.hora, lugar=EXCLUDED.lugar,
+                            carta_json=EXCLUDED.carta_json, updated_at=NOW()
+                    """, (chat_id, nombre_n, fecha, hora, lugar, json.dumps(carta)))
+            return f"Carta de {nombre} guardada."
+        except Exception as _e:
+            log.warning(f"astro_guardar pg fallback SQLite: {_e}")
+    # Fallback SQLite
     con = sqlite3.connect(DB_PATH)
     con.execute("""
         INSERT INTO perfiles_astro (chat_id, nombre, fecha, hora, lugar, carta_json)
@@ -215,24 +243,57 @@ def astro_guardar(chat_id: int, nombre: str, fecha: str, hora: str, lugar: str, 
             fecha=excluded.fecha, hora=excluded.hora,
             lugar=excluded.lugar, carta_json=excluded.carta_json,
             ts=CURRENT_TIMESTAMP
-    """, (chat_id, nombre.strip().lower(), fecha, hora, lugar, json.dumps(carta)))
+    """, (chat_id, nombre_n, fecha, hora, lugar, json.dumps(carta)))
     con.commit()
     con.close()
     return f"Carta de {nombre} guardada."
 
+
 def astro_recuperar(chat_id: int, nombre: str) -> dict | None:
     import json
+    nombre_n = nombre.strip().lower()
+    if _astro_use_pg():
+        try:
+            from services.db import pg_conn
+            with pg_conn() as con:
+                with con.cursor() as cur:
+                    cur.execute(
+                        "SELECT fecha, hora, lugar, carta_json FROM personal.astro_profiles WHERE chat_id=%s AND nombre=%s",
+                        (chat_id, nombre_n),
+                    )
+                    row = cur.fetchone()
+            if row:
+                carta = row[3] if isinstance(row[3], dict) else json.loads(row[3])
+                return {"fecha": row[0], "hora": row[1], "lugar": row[2], "carta": carta}
+        except Exception as _e:
+            log.warning(f"astro_recuperar pg fallback SQLite: {_e}")
+    # Fallback SQLite
     con = sqlite3.connect(DB_PATH)
     row = con.execute(
         "SELECT fecha, hora, lugar, carta_json FROM perfiles_astro WHERE chat_id=? AND nombre=?",
-        (chat_id, nombre.strip().lower())
+        (chat_id, nombre_n)
     ).fetchone()
     con.close()
     if not row:
         return None
     return {"fecha": row[0], "hora": row[1], "lugar": row[2], "carta": json.loads(row[3])}
 
+
 def astro_listar(chat_id: int) -> list:
+    nombre_fields = ("nombre", "fecha", "hora", "lugar")
+    if _astro_use_pg():
+        try:
+            from services.db import pg_conn
+            with pg_conn() as con:
+                with con.cursor() as cur:
+                    cur.execute("""
+                        SELECT nombre, fecha, hora, lugar, updated_at::date::text
+                        FROM personal.astro_profiles WHERE chat_id=%s ORDER BY nombre
+                    """, (chat_id,))
+                    rows = cur.fetchall()
+            return [{"nombre": r[0], "fecha": r[1], "hora": r[2], "lugar": r[3], "guardado": r[4]} for r in rows]
+        except Exception as _e:
+            log.warning(f"astro_listar pg fallback SQLite: {_e}")
     con = sqlite3.connect(DB_PATH)
     rows = con.execute(
         "SELECT nombre, fecha, hora, lugar, ts FROM perfiles_astro WHERE chat_id=? ORDER BY nombre",
@@ -241,11 +302,27 @@ def astro_listar(chat_id: int) -> list:
     con.close()
     return [{"nombre": r[0], "fecha": r[1], "hora": r[2], "lugar": r[3], "guardado": r[4][:10]} for r in rows]
 
+
 def astro_eliminar(chat_id: int, nombre: str) -> str:
+    nombre_n = nombre.strip().lower()
+    if _astro_use_pg():
+        try:
+            from services.db import pg_conn
+            with pg_conn() as con:
+                with con.cursor() as cur:
+                    cur.execute(
+                        "DELETE FROM personal.astro_profiles WHERE chat_id=%s AND nombre=%s",
+                        (chat_id, nombre_n),
+                    )
+                    deleted = cur.rowcount
+            if deleted:
+                return f"Perfil de {nombre} eliminado."
+        except Exception as _e:
+            log.warning(f"astro_eliminar pg fallback SQLite: {_e}")
     con = sqlite3.connect(DB_PATH)
     cur = con.execute(
         "DELETE FROM perfiles_astro WHERE chat_id=? AND nombre=?",
-        (chat_id, nombre.strip().lower())
+        (chat_id, nombre_n)
     )
     con.commit()
     con.close()
