@@ -217,6 +217,55 @@ async def handle_vault_callback(update, context):
         )
 
 
+async def cmd_usage(update, context):
+    """Uso mensual de tokens + costo estimado. /usage [slug].
+    Sin args: muestra el tenant del chat_id actual."""
+    from core.bot_core import OWNER_CHAT_ID
+    chat_id = update.effective_chat.id
+    try:
+        from services.tenants import resolve_tenant, list_tenants
+        from services.usage import get_period
+    except Exception as e:
+        await update.message.reply_text(f"Error: {e}")
+        return
+
+    args = context.args or []
+    if args and chat_id == OWNER_CHAT_ID:
+        slug = args[0]
+    else:
+        slug = resolve_tenant(chat_id)
+
+    u = get_period(slug)
+    if not u:
+        await update.message.reply_text(f"Sin datos de consumo para `{slug}`.", parse_mode="Markdown")
+        return
+    tin = u.get("tokens_in", 0)
+    tout = u.get("tokens_out", 0)
+    cost = u.get("cost_usd", 0.0)
+    msgs = u.get("msg_count", 0)
+    msg = (
+        f"📊 *Consumo del mes — `{slug}`*\n\n"
+        f"• Mensajes: {msgs}\n"
+        f"• Tokens in:  {tin:,}\n"
+        f"• Tokens out: {tout:,}\n"
+        f"• Total:      {tin + tout:,}\n"
+        f"• Costo estimado: *${cost:.4f} USD*\n"
+    )
+    if chat_id == OWNER_CHAT_ID and not args:
+        # Mostrar resumen de TODOS los tenants también
+        tenants = list_tenants()
+        if len(tenants) > 1:
+            msg += "\n━━━━━━━━━━━━━━━━━━━\n*Todos los tenants:*\n"
+            total_cost = 0.0
+            for t in tenants:
+                tu = get_period(t["slug"])
+                c = tu.get("cost_usd", 0.0)
+                total_cost += c
+                msg += f"• `{t['slug']}`: ${c:.4f} USD · {tu.get('msg_count',0)} msgs\n"
+            msg += f"\n*Total workspace: ${total_cost:.4f} USD*"
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+
 async def cmd_tenant(update, context):
     """Administración de tenants (solo owner).
 

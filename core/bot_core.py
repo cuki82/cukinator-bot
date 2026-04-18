@@ -1794,6 +1794,19 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
     _model  = _select_model(user_text, _intent)
     log.info(f"[{chat_id}] model={_model} intent={_intent}")
 
+    # Budget check per-tenant (si el tenant tiene monthly_budget_usd en settings
+    # y ya lo excedió, cortamos acá para evitar gasto runaway). El owner bypass.
+    if not is_owner:
+        try:
+            from services.tenants import resolve_tenant as _rt_bg
+            from services.usage import check_budget as _cb
+            _tslug = _rt_bg(chat_id)
+            _ok_budget, _budget_msg = _cb(_tslug)
+            if not _ok_budget:
+                return f"⚠️ {_budget_msg}", None, []
+        except Exception as _bge:
+            log.debug(f"budget check skip: {_bge}")
+
     _MODEL_FRIENDLY = {
         "claude-haiku-4-5":  "Haiku 4.5",
         "claude-sonnet-4-6": "Sonnet 4.6",
@@ -1875,9 +1888,18 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
         try:
             _u = getattr(response, "usage", None)
             if _u:
-                _tokens_in  += getattr(_u, "input_tokens", 0) or 0
-                _tokens_out += getattr(_u, "output_tokens", 0) or 0
+                _ti = getattr(_u, "input_tokens", 0) or 0
+                _to = getattr(_u, "output_tokens", 0) or 0
+                _tokens_in  += _ti
+                _tokens_out += _to
                 _cache_read += getattr(_u, "cache_read_input_tokens", 0) or 0
+                # Registrar usage en shared.tenant_usage (fail silent si no hay PG)
+                try:
+                    from services.usage import record as _rec
+                    from services.tenants import resolve_tenant as _rt2
+                    _rec(_rt2(chat_id), _model, _ti, _to)
+                except Exception:
+                    pass
         except Exception:
             pass
         log.info(f"[{chat_id}] Claude iter {iteration} stop_reason={response.stop_reason}")
