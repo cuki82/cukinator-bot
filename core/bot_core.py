@@ -1760,8 +1760,10 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
     }
 
     # Per-tenant tool whitelist: si el tenant declaró tools_enabled en su
-    # settings, filtrar al set (+ siempre incluir las utility básicas).
-    _tenant_whitelist = get_tenant_tools_filter(chat_id)
+    # settings, filtrar al set para NO-owners. El owner siempre tiene todas
+    # las tools (excepto las NEVER_LLM_TOOLS) — la whitelist es para limitar
+    # qué ven otros gerentes/tenants, no al dueño del bot.
+    _tenant_whitelist = set() if is_owner else get_tenant_tools_filter(chat_id)
     _always_on = {"get_time", "get_weather"}  # utility universales, nunca filtrar
 
     tools_activos = [
