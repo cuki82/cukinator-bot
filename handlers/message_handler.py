@@ -43,6 +43,13 @@ import re as _re_cred
 
 _CREDENTIAL_PATTERNS = [
     # (regex, vault_key_name, service_display_name)
+    # URLs de DB con creds (Postgres/Supabase) — matchean ANTES que otros
+    # patterns de JWT, porque el URL puede contener `eyJ...` dentro del query string.
+    (r"postgresql://[\w._\-]+:[^@\s]+@[\w.\-]+:\d+/\w+(?:\?[^\s]*)?",  "SUPABASE_DB_URL",   "Supabase/Postgres DB URL"),
+    (r"postgres://[\w._\-]+:[^@\s]+@[\w.\-]+:\d+/\w+(?:\?[^\s]*)?",    "SUPABASE_DB_URL",   "Postgres DB URL"),
+    (r"https://[a-z0-9]+\.supabase\.co",                                "SUPABASE_URL",      "Supabase REST URL"),
+    (r"sbp_[A-Za-z0-9]{40,}",                                           "SUPABASE_SERVICE_KEY","Supabase service key"),
+    # API keys por servicio
     (r"sk-ant-api\d{2}-[A-Za-z0-9_\-]{60,}",       "ANTHROPIC_KEY",     "Anthropic API"),
     (r"sk-proj-[A-Za-z0-9_\-]{80,}",                "OPENAI_API_KEY",    "OpenAI (project)"),
     (r"sk-[A-Za-z0-9]{40,}",                        "OPENAI_API_KEY",    "OpenAI (legacy)"),

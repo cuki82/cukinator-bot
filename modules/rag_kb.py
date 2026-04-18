@@ -1,19 +1,167 @@
 """
-modules/rag_kb.py — RAG engine para knowledge base general del proyecto.
+modules/rag_kb.py — RAG engine dual-mode: pgvector (Supabase) o SQLite+TF-IDF.
 
-Vocabulario TF-IDF mixto: reaseguros + dominio Cukinator (bot/VPS/infra).
-Cada documento lleva un namespace para filtrar por dominio.
-Migrar a sentence-transformers cuando haga falta recall semántico real.
+Backend preferido: pgvector con OpenAI text-embedding-3-small (1536 dim).
+La búsqueda corre en Postgres con índice HNSW (latencia ~5-20ms por query
+sobre 100k chunks). Multi-tenant: cada tenant tiene su propio schema con
+su propio kb_documents (reamerica.kb_documents, diaz.kb_documents, etc).
+
+Backend fallback (cuando no hay Supabase configurada): SQLite + numpy +
+TF-IDF con vocab mixto. Mantiene el bot funcional en dev o mientras no se
+haya migrado. El switching es automático: pg_available() → pgvector, sino
+TF-IDF local.
+
+Cada chunk lleva un `namespace` (reaseguros, cukinator, personal, etc.)
+para filtrar por dominio dentro del mismo tenant.
 """
 import os
 import json
 import sqlite3
 import logging
 import hashlib
+import requests
 import numpy as np
 
 log = logging.getLogger(__name__)
 DB_PATH = os.environ.get("DB_PATH", "/data/memory.db")
+
+# ── Backend detection ─────────────────────────────────────────────────────
+try:
+    from services.db import pg_available, pg_conn  # type: ignore
+    from services.tenants import resolve_tenant, tenant_schema, DEFAULT_TENANT  # type: ignore
+    _HAS_PG_LAYER = True
+except Exception:
+    _HAS_PG_LAYER = False
+    def pg_available() -> bool: return False
+    def resolve_tenant(_cid): return "reamerica"
+    def tenant_schema(s): return s
+    DEFAULT_TENANT = "reamerica"
+
+
+_OPENAI_EMBED_MODEL = os.environ.get("OPENAI_EMBED_MODEL", "text-embedding-3-small")
+_OPENAI_EMBED_DIM = 1536  # debe coincidir con vector(N) del schema SQL
+
+
+def _openai_embed(text: str):
+    """Un embedding vía OpenAI /v1/embeddings. Devuelve lista de floats o None.
+    Latencia típica: 50-150ms."""
+    key = os.environ.get("OPENAI_API_KEY") or os.environ.get("OPENAI_KEY", "")
+    if not key:
+        return None
+    try:
+        r = requests.post(
+            "https://api.openai.com/v1/embeddings",
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            json={"model": _OPENAI_EMBED_MODEL, "input": text[:8000]},
+            timeout=15,
+        )
+        if r.status_code != 200:
+            log.error(f"openai embed {r.status_code}: {r.text[:200]}")
+            return None
+        return r.json()["data"][0]["embedding"]
+    except Exception as e:
+        log.error(f"openai embed error: {e}")
+        return None
+
+
+def _openai_embed_batch(texts: list) -> list:
+    """Embeddings en batch. Más rápido que uno-a-uno para ingest masivo."""
+    key = os.environ.get("OPENAI_API_KEY") or os.environ.get("OPENAI_KEY", "")
+    if not key:
+        return [None] * len(texts)
+    try:
+        r = requests.post(
+            "https://api.openai.com/v1/embeddings",
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            json={"model": _OPENAI_EMBED_MODEL, "input": [t[:8000] for t in texts]},
+            timeout=30,
+        )
+        if r.status_code != 200:
+            log.error(f"openai embed batch {r.status_code}: {r.text[:200]}")
+            return [None] * len(texts)
+        data = r.json()["data"]
+        return [d["embedding"] for d in data]
+    except Exception as e:
+        log.error(f"openai embed batch error: {e}")
+        return [None] * len(texts)
+
+
+# ── Backend pgvector ──────────────────────────────────────────────────────
+
+def _pg_vec_literal(vec: list) -> str:
+    """Formato de vector para pgvector: '[0.1,0.2,...]'."""
+    return "[" + ",".join(f"{x:.6f}" for x in vec) + "]"
+
+
+def _pg_ingest(schema: str, source: str, chunks: list, metadata: dict, namespace: str) -> int:
+    """Ingest batch a Postgres. Usa embeddings OpenAI en batch."""
+    embs = _openai_embed_batch(chunks)
+    meta_json = json.dumps(metadata or {})
+    indexed = 0
+    with pg_conn() as con:
+        with con.cursor() as cur:
+            for i, (chunk, emb) in enumerate(zip(chunks, embs)):
+                if emb is None:
+                    log.warning(f"skip chunk {i} de {source}: embedding vacío")
+                    continue
+                content_hash = hashlib.md5(chunk.encode()).hexdigest()
+                cur.execute(
+                    f"""INSERT INTO {schema}.kb_documents
+                        (source, chunk_index, content, embedding, metadata, namespace, content_hash)
+                        VALUES (%s, %s, %s, %s::vector, %s::jsonb, %s, %s)
+                        ON CONFLICT (source, chunk_index) DO UPDATE
+                        SET content = EXCLUDED.content,
+                            embedding = EXCLUDED.embedding,
+                            metadata = EXCLUDED.metadata,
+                            namespace = EXCLUDED.namespace,
+                            content_hash = EXCLUDED.content_hash""",
+                    (source, i, chunk, _pg_vec_literal(emb), meta_json, namespace, content_hash),
+                )
+                indexed += 1
+    log.info(f"pg ingest {schema}.{source}: {indexed}/{len(chunks)} chunks (ns={namespace})")
+    return indexed
+
+
+def _pg_search(schema: str, query: str, top_k: int, namespace):
+    """Search vectorial HNSW. Retorna lista de dicts."""
+    emb = _openai_embed(query)
+    if emb is None:
+        return []
+    vec = _pg_vec_literal(emb)
+    with pg_conn() as con:
+        with con.cursor() as cur:
+            # Tunear ef_search para latencia/recall trade-off
+            cur.execute("SET LOCAL hnsw.ef_search = 40")
+            if namespace:
+                cur.execute(
+                    f"""SELECT source, chunk_index, content, namespace,
+                              1 - (embedding <=> %s::vector) AS score,
+                              metadata
+                        FROM {schema}.kb_documents
+                        WHERE namespace = %s
+                        ORDER BY embedding <=> %s::vector
+                        LIMIT %s""",
+                    (vec, namespace, vec, top_k),
+                )
+            else:
+                cur.execute(
+                    f"""SELECT source, chunk_index, content, namespace,
+                              1 - (embedding <=> %s::vector) AS score,
+                              metadata
+                        FROM {schema}.kb_documents
+                        ORDER BY embedding <=> %s::vector
+                        LIMIT %s""",
+                    (vec, vec, top_k),
+                )
+            rows = cur.fetchall()
+    return [
+        {
+            "source": r[0], "chunk_index": r[1], "content": r[2],
+            "namespace": r[3] or "general", "score": float(r[4]),
+            "metadata": r[5] if isinstance(r[5], dict) else json.loads(r[5] or "{}"),
+        }
+        for r in rows
+    ]
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS kb_documents (
@@ -146,15 +294,28 @@ def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> list[str]
     return chunks
 
 
-def ingest(source: str, text: str, metadata: dict = None, namespace: str = "general") -> int:
+def ingest(source: str, text: str, metadata: dict = None, namespace: str = "general",
+           tenant: str = None, chat_id: int = None) -> int:
     """
-    Indexa un documento en la KB.
-    source: identificador unico (nombre de archivo, URL, etc.)
-    text: contenido completo
-    namespace: dominio del doc (reinsurance, cukinator, personal, general, ...)
-    Retorna cantidad de chunks indexados.
+    Indexa un documento en la KB del tenant.
+    - Si hay Postgres (pgvector): embedding OpenAI + insert en <tenant>.kb_documents.
+    - Si no: TF-IDF + SQLite local (fallback).
+    - tenant: slug del tenant; si no se pasa, se resuelve de chat_id; sino default.
     """
     chunks = chunk_text(text)
+    if not chunks:
+        return 0
+
+    # Backend Postgres + pgvector
+    if pg_available():
+        slug = tenant or (resolve_tenant(chat_id) if chat_id else DEFAULT_TENANT)
+        schema = tenant_schema(slug)
+        try:
+            return _pg_ingest(schema, source, chunks, metadata or {}, namespace)
+        except Exception as e:
+            log.error(f"pg ingest falló ({slug}.{source}): {e} — fallback a SQLite")
+
+    # Fallback SQLite + TF-IDF
     embeddings = _embed(chunks)
     meta_str = json.dumps(metadata or {})
     con = _conn()
@@ -173,16 +334,27 @@ def ingest(source: str, text: str, metadata: dict = None, namespace: str = "gene
             log.error(f"Error indexando chunk {i} de {source}: {e}")
     con.commit()
     con.close()
-    log.info(f"KB: indexados {indexed} chunks de '{source}' (ns={namespace})")
+    log.info(f"KB(sqlite): indexados {indexed} chunks de '{source}' (ns={namespace})")
     return indexed
 
 
-def search(query: str, top_k: int = 5, source_filter: str = None, namespace: str = None) -> list[dict]:
+def search(query: str, top_k: int = 5, source_filter: str = None, namespace: str = None,
+           tenant: str = None, chat_id: int = None) -> list:
     """
-    Busca los chunks mas relevantes para la query.
-    namespace: si se especifica, filtra por ese namespace.
-    Retorna lista de dicts con content, source, score, namespace, metadata.
+    Busca los chunks más relevantes para la query en la KB del tenant.
+    namespace: filtra por dominio (reinsurance, cukinator, personal, ...).
+    Si hay Postgres: HNSW + OpenAI embeddings. Sino: TF-IDF + SQLite.
     """
+    # Backend Postgres
+    if pg_available():
+        slug = tenant or (resolve_tenant(chat_id) if chat_id else DEFAULT_TENANT)
+        schema = tenant_schema(slug)
+        try:
+            return _pg_search(schema, query, top_k, namespace)
+        except Exception as e:
+            log.error(f"pg search falló ({slug}): {e} — fallback a SQLite")
+
+    # Fallback SQLite + TF-IDF
     query_vec = np.array(_embed([query])[0], dtype=np.float32)
     con = _conn()
     where = "WHERE embedding IS NOT NULL"
@@ -221,12 +393,15 @@ def search(query: str, top_k: int = 5, source_filter: str = None, namespace: str
 MIN_SCORE = 0.15
 
 
-def build_context(query: str, top_k: int = 5, namespace: str = None, min_score: float = MIN_SCORE) -> str:
+def build_context(query: str, top_k: int = 5, namespace: str = None,
+                  min_score: float = MIN_SCORE, tenant: str = None,
+                  chat_id: int = None) -> str:
     """
     Arma el contexto RAG para incluir en el prompt de Claude.
     Solo incluye chunks con score >= min_score. Retorna "" si no hay nada relevante.
+    Multi-tenant: usa el schema del tenant resuelto del chat_id (o el explícito).
     """
-    results = search(query, top_k=top_k, namespace=namespace)
+    results = search(query, top_k=top_k, namespace=namespace, tenant=tenant, chat_id=chat_id)
     results = [r for r in results if r["score"] >= min_score]
     if not results:
         return ""

@@ -1563,7 +1563,7 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
                 "research":    None,  # busca en todos los namespaces
             }
             _ns = _ns_map.get(_intent)
-            _rag_ctx = build_context(user_text, top_k=4, namespace=_ns)
+            _rag_ctx = build_context(user_text, top_k=4, namespace=_ns, chat_id=chat_id)
             if _rag_ctx:
                 messages = [{"role": "user", "content": _rag_ctx + chr(10)*2 + user_text}]
                 _rag_injected = True
