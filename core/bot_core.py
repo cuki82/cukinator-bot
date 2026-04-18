@@ -3643,6 +3643,34 @@ async def menu_lista_cartas(update_or_query, context, chat_id):
     else:
         await update_or_query.edit_message_text("¿De quién querés ver la carta?", reply_markup=teclado)
 
+def _save_astro_output(chat_id: int, nombre: str, tipo: str, contenido: str) -> None:
+    """Guarda automáticamente cualquier output astrológico (ficha, explicación,
+    perspectiva, tránsitos, triple capa) en el historial del perfil. Nunca
+    pregunta — es append-only por diseño."""
+    try:
+        con = sqlite3.connect(DB_PATH)
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS astro_outputs (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id    BIGINT NOT NULL,
+                nombre     TEXT NOT NULL,
+                tipo       TEXT NOT NULL,
+                contenido  TEXT NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        con.execute("CREATE INDEX IF NOT EXISTS idx_astro_out_nombre ON astro_outputs(chat_id, nombre, tipo)")
+        con.execute(
+            "INSERT INTO astro_outputs(chat_id, nombre, tipo, contenido) VALUES (?, ?, ?, ?)",
+            (chat_id, (nombre or "").lower(), tipo, contenido or ""),
+        )
+        con.commit()
+        con.close()
+        log.info(f"astro_output guardado: chat={chat_id} nombre={nombre} tipo={tipo} len={len(contenido or '')}")
+    except Exception as e:
+        log.error(f"_save_astro_output error: {e}")
+
+
 async def menu_opciones_persona(query, nombre):
     botones = [
         [InlineKeyboardButton("Ficha técnica natal",    callback_data=f"astro:natal:{nombre}")],
@@ -3711,6 +3739,158 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             MAX = 4000
             for i in range(0, len(payload), MAX):
                 await context.bot.send_message(chat_id=chat_id, text=payload[i:i+MAX])
+            # Auto-guardado en el perfil
+            kind_tipo = "ficha_tecnica" if ficha_tecnica else "ficha_natal"
+            _save_astro_output(chat_id, nombre, kind_tipo, payload)
+            # Follow-up: ofrecer explicación / perspectiva / PDF / guardar
+            kind = "ficha" if ficha_tecnica else "natal"
+            botones_fu = [
+                [InlineKeyboardButton("💬 Explicación sin jerga", callback_data=f"astro:explicar:{kind}:{nombre}")],
+                [InlineKeyboardButton("💼 Desde una perspectiva", callback_data=f"astro:perspectiva:{kind}:{nombre}")],
+                [InlineKeyboardButton("📄 Generar PDF",           callback_data=f"astro:pdf:{kind}:{nombre}")],
+                [InlineKeyboardButton("Así está bien",            callback_data="astro:cerrar")],
+            ]
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="¿Querés algo más con esto?",
+                reply_markup=InlineKeyboardMarkup(botones_fu),
+            )
+
+    elif data.startswith("astro:explicar:"):
+        # astro:explicar:<kind>:<nombre>  — interpretación en criollo, sin jerga
+        parts = data.split(":", 3)
+        kind, nombre = parts[2], parts[3]
+        await query.edit_message_text(f"⏳ Armando explicación en criollo de {nombre.title()}...")
+        datos = astro_recuperar(chat_id, nombre)
+        if not datos:
+            await context.bot.send_message(chat_id=chat_id, text="No encontré la carta.")
+            return
+        import threading as _th, queue as _q
+        _que = _q.Queue()
+        prompt_criollo = (
+            f"Tengo la carta natal de {nombre} (fecha {datos['fecha']}, hora {datos['hora']}, lugar {datos['lugar']}). "
+            f"Dame una explicación COMPLETA de esta carta en criollo argentino, DIRECTA, sin terminología técnica. "
+            f"Evitá palabras como 'casa', 'cúspide', 'aspecto', 'trígono', 'cuadratura', 'regente', 'plenivalencia'. "
+            f"Describí cómo es la persona, qué temas le tocan, qué le cuesta, qué le fluye, con ejemplos cotidianos. "
+            f"Calculá primero la carta con calcular_carta_natal para basarte en datos reales, después traducí."
+        )
+        def _run_explicar():
+            try:
+                r = ask_claude(chat_id, prompt_criollo, user_name="Cuki")
+                _que.put(("ok", r))
+            except Exception as ex:
+                _que.put(("err", str(ex)))
+        _t = _th.Thread(target=_run_explicar, daemon=True); _t.start()
+        import asyncio
+        _el = 0
+        while _t.is_alive() and _el < 240:
+            await asyncio.sleep(4); _el += 4
+            try: await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+            except: pass
+        if _t.is_alive():
+            await context.bot.send_message(chat_id=chat_id, text="Tardó demasiado, probá de nuevo.")
+            return
+        st, payload = _que.get_nowait()
+        if st == "err":
+            await context.bot.send_message(chat_id=chat_id, text=f"Error: {payload}")
+        else:
+            reply_text, _pdf, _extras = payload if isinstance(payload, tuple) else (payload, None, [])
+            await send_long_message(context.bot, chat_id, reply_text)
+            _save_astro_output(chat_id, nombre, "explicacion_criollo", reply_text)
+
+    elif data.startswith("astro:perspectiva:"):
+        # astro:perspectiva:<kind>:<nombre>  — submenu de perspectivas
+        parts = data.split(":", 3)
+        kind, nombre = parts[2], parts[3]
+        botones_p = [
+            [InlineKeyboardButton("💞 Vincular / pareja",     callback_data=f"astro:persp:vincular:{kind}:{nombre}")],
+            [InlineKeyboardButton("💼 Laboral / vocacional",   callback_data=f"astro:persp:laboral:{kind}:{nombre}")],
+            [InlineKeyboardButton("🌱 Evolutiva / espiritual", callback_data=f"astro:persp:evolutiva:{kind}:{nombre}")],
+            [InlineKeyboardButton("💰 Financiera",             callback_data=f"astro:persp:financiera:{kind}:{nombre}")],
+            [InlineKeyboardButton("🧘 Salud física y mental",  callback_data=f"astro:persp:salud:{kind}:{nombre}")],
+            [InlineKeyboardButton("← Volver",                  callback_data=f"astro:ver:{nombre}")],
+        ]
+        await query.edit_message_text(
+            "¿Desde qué perspectiva querés la lectura?",
+            reply_markup=InlineKeyboardMarkup(botones_p),
+        )
+
+    elif data.startswith("astro:persp:"):
+        # astro:persp:<persp>:<kind>:<nombre>  — ejecuta la interpretación
+        parts = data.split(":", 4)
+        persp, kind, nombre = parts[2], parts[3], parts[4]
+        persp_label = {
+            "vincular":   "vincular y de pareja",
+            "laboral":    "laboral y vocacional",
+            "evolutiva":  "evolutiva y espiritual",
+            "financiera": "financiera y del dinero",
+            "salud":      "de la salud física y mental",
+        }.get(persp, persp)
+        await query.edit_message_text(f"⏳ Leyendo desde la perspectiva {persp_label}...")
+        datos = astro_recuperar(chat_id, nombre)
+        if not datos:
+            await context.bot.send_message(chat_id=chat_id, text="No encontré la carta.")
+            return
+        import threading as _th, queue as _q, asyncio
+        _que = _q.Queue()
+        prompt = (
+            f"Leeme la carta natal de {nombre} (fecha {datos['fecha']}, hora {datos['hora']}, "
+            f"lugar {datos['lugar']}) DESDE LA PERSPECTIVA {persp_label.upper()}. "
+            f"Calculá primero la carta con calcular_carta_natal para basarte en datos reales. "
+            f"Enfocate SOLO en lo que aporta esa perspectiva — no hagas lectura general. "
+            f"Escribí directo, en criollo, sin tecnicismos astrológicos."
+        )
+        def _run():
+            try: _que.put(("ok", ask_claude(chat_id, prompt, user_name="Cuki")))
+            except Exception as ex: _que.put(("err", str(ex)))
+        _t = _th.Thread(target=_run, daemon=True); _t.start()
+        _el = 0
+        while _t.is_alive() and _el < 240:
+            await asyncio.sleep(4); _el += 4
+            try: await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+            except: pass
+        if _t.is_alive():
+            await context.bot.send_message(chat_id=chat_id, text="Tardó demasiado.")
+            return
+        st, payload = _que.get_nowait()
+        if st == "err":
+            await context.bot.send_message(chat_id=chat_id, text=f"Error: {payload}")
+        else:
+            reply_text, _pdf, _extras = payload if isinstance(payload, tuple) else (payload, None, [])
+            await send_long_message(context.bot, chat_id, reply_text)
+            _save_astro_output(chat_id, nombre, f"perspectiva_{persp}", reply_text)
+
+    elif data.startswith("astro:pdf:"):
+        # astro:pdf:<kind>:<nombre>  — regenera la ficha y la manda como PDF
+        parts = data.split(":", 3)
+        kind, nombre = parts[2], parts[3]
+        await query.edit_message_text(f"⏳ Generando PDF de {nombre.title()}...")
+        datos = astro_recuperar(chat_id, nombre)
+        if not datos:
+            await context.bot.send_message(chat_id=chat_id, text="No encontré la carta.")
+            return
+        try:
+            from modules import swiss_engine as e
+            carta = e.calc_carta_completa(datos["fecha"], datos["hora"], datos["lugar"])
+            ficha_tecnica = (kind == "ficha")
+            if ficha_tecnica:
+                for n, d in carta["planetas"].items():
+                    if "error" not in d:
+                        d["dignidad"] = e.calc_dignidad(n, d["signo"])
+                        d["estado_dinamico"] = e.calc_estado_dinamico(d["speed"], n)
+                carta["regentes"] = e.calc_regentes(carta["planetas"], carta["casas"])
+            pdf_path = generar_pdf(carta, ficha_tecnica=ficha_tecnica)
+            with open(pdf_path, "rb") as f:
+                await context.bot.send_document(
+                    chat_id=chat_id, document=f,
+                    filename=f"carta_{nombre}_{kind}.pdf",
+                    caption=f"Carta {'completa' if ficha_tecnica else 'natal'} de {nombre.title()}",
+                )
+            try: os.unlink(pdf_path)
+            except: pass
+        except Exception as ex:
+            log.error(f"PDF menu error: {ex}")
+            await context.bot.send_message(chat_id=chat_id, text=f"Error generando PDF: {ex}")
 
     elif data.startswith("astro:transitos:"):
         nombre = data.split(":", 2)[2]
@@ -3759,7 +3939,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             header = f"🪐 *Tránsitos sobre {label} — {nombre.title()}*\n"
             header += f"📍 {datos['fecha']} · {datos['hora']} · {datos['lugar'][:40]}\n\n"
             body = formatear_transitos(trans, top_n=20, etiqueta_natal=label)
-            await query.edit_message_text(header + body, parse_mode="Markdown")
+            full_text = header + body
+            await query.edit_message_text(full_text, parse_mode="Markdown")
+            _save_astro_output(chat_id, nombre, f"transitos_{target}", full_text)
         except Exception as ex:
             log.error(f"Trans {target} error: {ex}")
             await query.edit_message_text(f"Error calculando: {ex}")
@@ -3786,6 +3968,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text(payload[:MAX], parse_mode="Markdown")
                 for i in range(MAX, len(payload), MAX):
                     await context.bot.send_message(chat_id=chat_id, text=payload[i:i+MAX], parse_mode="Markdown")
+            _save_astro_output(chat_id, nombre, "triple_capa", payload)
         except Exception as ex:
             log.error(f"Triple error: {ex}")
             await query.edit_message_text(f"Error en triple capa: {ex}")
