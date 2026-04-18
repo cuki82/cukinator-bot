@@ -3550,12 +3550,14 @@ async def handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             if not perfiles:
                 await query.edit_message_text("No hay cartas guardadas. Primero calculá una carta natal.")
                 return
+            # Llevar al menú de opciones de la persona (donde elige ficha técnica
+            # → capa natal/solar/lunar → formato), no directo a una ficha fija.
             botones = [[InlineKeyboardButton(
-                p['nombre'].title(), callback_data=f"astro:ficha:{p['nombre']}"
+                p['nombre'].title(), callback_data=f"astro:ver:{p['nombre']}"
             )] for p in perfiles]
             botones.append([InlineKeyboardButton("← Volver", callback_data="menu:astro")])
             await query.edit_message_text(
-                "¿De quién querés la ficha técnica completa?",
+                "¿De quién querés la carta?",
                 reply_markup=InlineKeyboardMarkup(botones)
             )
             return
@@ -3673,9 +3675,8 @@ def _save_astro_output(chat_id: int, nombre: str, tipo: str, contenido: str) -> 
 
 async def menu_opciones_persona(query, nombre):
     botones = [
-        [InlineKeyboardButton("Ficha técnica natal",    callback_data=f"astro:natal:{nombre}")],
-        [InlineKeyboardButton("Ficha técnica completa", callback_data=f"astro:ficha:{nombre}")],
-        [InlineKeyboardButton("Tránsitos actuales",     callback_data=f"astro:transitos:{nombre}")],
+        [InlineKeyboardButton("📋 Ficha técnica (elegí capa)", callback_data=f"astro:capas:{nombre}")],
+        [InlineKeyboardButton("🪐 Tránsitos (sobre natal/solar/lunar)", callback_data=f"astro:transitos:{nombre}")],
         [InlineKeyboardButton("Volver",                 callback_data="astro:list")],
     ]
     teclado = InlineKeyboardMarkup(botones)
@@ -3694,44 +3695,101 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         nombre = data.split(":", 2)[2]
         await menu_opciones_persona(query, nombre)
 
-    elif data.startswith("astro:natal:") or data.startswith("astro:ficha:"):
-        # Ahora primero preguntamos el formato antes de ejecutar.
-        # 3 modos + PDF + volver.
+    elif data.startswith("astro:capas:"):
+        # Submenú: elegir qué capa (natal/solar/lunar) de la ficha técnica.
         nombre = data.split(":", 2)[2]
-        ficha_tecnica = data.startswith("astro:ficha:")
-        kind = "ficha" if ficha_tecnica else "natal"
-        titulo = "Ficha técnica completa" if ficha_tecnica else "Ficha natal"
         botones = [
-            [InlineKeyboardButton("📊 Técnico + explicación + gestalt", callback_data=f"astro:render:{kind}:tecexpl:{nombre}")],
-            [InlineKeyboardButton("💬 Solo explicación en criollo",     callback_data=f"astro:render:{kind}:expl:{nombre}")],
-            [InlineKeyboardButton("🔬 Solo técnico (data pura)",         callback_data=f"astro:render:{kind}:tec:{nombre}")],
-            [InlineKeyboardButton("📄 PDF técnico",                      callback_data=f"astro:render:{kind}:pdf:{nombre}")],
-            [InlineKeyboardButton("← Volver",                            callback_data=f"astro:ver:{nombre}")],
+            [InlineKeyboardButton("🌍 Natal (base permanente)",           callback_data=f"astro:fichacapa:natal:{nombre}")],
+            [InlineKeyboardButton("☀️ Solar (tema del año)",              callback_data=f"astro:fichacapa:solar:{nombre}")],
+            [InlineKeyboardButton("🌙 Lunar (tema del mes)",              callback_data=f"astro:fichacapa:lunar:{nombre}")],
+            [InlineKeyboardButton("← Volver",                             callback_data=f"astro:ver:{nombre}")],
         ]
         await query.edit_message_text(
-            f"*{titulo} de {nombre.title()}*\n\n¿Cómo la querés?",
+            f"*Ficha técnica — {nombre.title()}*\n\n¿Qué capa querés?\n\n"
+            "• *Natal* — la carta base, no cambia nunca\n"
+            "• *Solar* — carta del año astral vigente (última revolución solar)\n"
+            "• *Lunar* — carta del mes astral vigente (última revolución lunar)",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(botones),
         )
 
+    elif data.startswith("astro:fichacapa:"):
+        # astro:fichacapa:<capa>:<nombre> — al elegir capa, mostrar menú de formato
+        parts = data.split(":", 3)
+        capa, nombre = parts[2], parts[3]
+        capa_label = {"natal": "Natal", "solar": "Solar (año)", "lunar": "Lunar (mes)"}.get(capa, capa)
+        botones = [
+            [InlineKeyboardButton("📊 Técnico + explicación + gestalt (chat)", callback_data=f"astro:render:{capa}:tecexpl:{nombre}")],
+            [InlineKeyboardButton("💬 Explicación en criollo + gestalt (chat)", callback_data=f"astro:render:{capa}:expl:{nombre}")],
+            [InlineKeyboardButton("🔬 Solo técnico / data pura (chat)",         callback_data=f"astro:render:{capa}:tec:{nombre}")],
+            [InlineKeyboardButton("📄 PDF técnico",                             callback_data=f"astro:render:{capa}:pdf:{nombre}")],
+            [InlineKeyboardButton("📑 PDF técnico + interpretación + gestalt",  callback_data=f"astro:render:{capa}:pdfexpl:{nombre}")],
+            [InlineKeyboardButton("📖 PDF solo interpretación + gestalt",       callback_data=f"astro:render:{capa}:pdfonly:{nombre}")],
+            [InlineKeyboardButton("← Volver",                                   callback_data=f"astro:capas:{nombre}")],
+        ]
+        await query.edit_message_text(
+            f"*Ficha {capa_label} — {nombre.title()}*\n\n¿Cómo la querés?",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(botones),
+        )
+
+    elif data.startswith("astro:natal:") or data.startswith("astro:ficha:"):
+        # Compat con callbacks viejos: redirigir al nuevo submenu de capas.
+        nombre = data.split(":", 2)[2]
+        await query.edit_message_text(f"Redirigiendo...")
+        from telegram import InlineKeyboardMarkup as _IK, InlineKeyboardButton as _IB
+        botones = [
+            [_IB("🌍 Natal",  callback_data=f"astro:fichacapa:natal:{nombre}")],
+            [_IB("☀️ Solar",   callback_data=f"astro:fichacapa:solar:{nombre}")],
+            [_IB("🌙 Lunar",   callback_data=f"astro:fichacapa:lunar:{nombre}")],
+            [_IB("← Volver",  callback_data=f"astro:ver:{nombre}")],
+        ]
+        await query.edit_message_text(
+            f"*Ficha técnica — {nombre.title()}*\n¿Qué capa?",
+            parse_mode="Markdown", reply_markup=_IK(botones),
+        )
+
     elif data.startswith("astro:render:"):
-        # astro:render:<kind>:<modo>:<nombre>
+        # astro:render:<capa>:<modo>:<nombre>  donde capa = natal | solar | lunar
+        # (por compat viejos callbacks podían mandar kind=ficha|natal; tratamos "ficha" como natal completa)
         parts = data.split(":", 4)
-        kind, modo, nombre = parts[2], parts[3], parts[4]
-        ficha_tecnica = (kind == "ficha")
-        await query.edit_message_text(f"⏳ Generando {nombre.title()} ({modo})...")
+        capa, modo, nombre = parts[2], parts[3], parts[4]
+        if capa in ("ficha",):
+            capa = "natal"  # compat
+        ficha_tecnica = True  # siempre sección completa (el user lo pidió así)
+        await query.edit_message_text(f"⏳ Generando {nombre.title()} — capa {capa} ({modo})...")
         datos = astro_recuperar(chat_id, nombre)
         if not datos:
             await context.bot.send_message(chat_id=chat_id, text=f"No encontré carta de {nombre.title()}.")
             return
 
+        # Helper: calcular la carta correspondiente a la capa
+        def _carta_por_capa():
+            from modules import swiss_engine as e
+            natal = e.calc_carta_completa(datos["fecha"], datos["hora"], datos["lugar"])
+            if capa == "natal":
+                carta = natal
+            elif capa == "solar":
+                carta = e.calc_retorno_solar(natal)
+            elif capa == "lunar":
+                carta = e.calc_retorno_lunar(natal)
+            else:
+                carta = natal
+            # Enriquecer con secciones técnicas si es natal (ficha completa)
+            if capa == "natal":
+                for n, d in carta["planetas"].items():
+                    if "error" not in d:
+                        d["dignidad"] = e.calc_dignidad(n, d["signo"])
+                        d["estado_dinamico"] = e.calc_estado_dinamico(d["speed"], n)
+                carta["regentes"] = e.calc_regentes(carta["planetas"], carta["casas"])
+            return carta
+
         # Helper: enviar follow-up con menú contextual al final
         async def _send_followup():
             botones_fu = [
                 [InlineKeyboardButton("🪐 Ver tránsitos", callback_data=f"astro:transitos:{nombre}")],
-                [InlineKeyboardButton("💼 Desde una perspectiva", callback_data=f"astro:perspectiva:{kind}:{nombre}")],
-                [InlineKeyboardButton("📄 Generar PDF",   callback_data=f"astro:pdf:{kind}:{nombre}")],
-                [InlineKeyboardButton("💾 Marcar como referencia", callback_data=f"astro:ref:{kind}:{nombre}")],
+                [InlineKeyboardButton("💼 Desde una perspectiva", callback_data=f"astro:perspectiva:{capa}:{nombre}")],
+                [InlineKeyboardButton("📑 PDF + interpretación",  callback_data=f"astro:render:{capa}:pdfexpl:{nombre}")],
                 [InlineKeyboardButton("Así está bien",    callback_data="astro:cerrar")],
             ]
             await context.bot.send_message(
@@ -3740,47 +3798,160 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=InlineKeyboardMarkup(botones_fu),
             )
 
-        # Modo PDF: igual al callback astro:pdf existente, dirigido acá
-        if modo == "pdf":
+        # Modo PDF sólo con la interpretación en criollo + gestalt (sin data técnica en el PDF)
+        if modo == "pdfonly":
             try:
                 from modules import swiss_engine as e
-                carta = e.calc_carta_completa(datos["fecha"], datos["hora"], datos["lugar"])
-                if ficha_tecnica:
-                    for n, d in carta["planetas"].items():
-                        if "error" not in d:
-                            d["dignidad"] = e.calc_dignidad(n, d["signo"])
-                            d["estado_dinamico"] = e.calc_estado_dinamico(d["speed"], n)
-                    carta["regentes"] = e.calc_regentes(carta["planetas"], carta["casas"])
-                pdf_path = generar_pdf(carta, ficha_tecnica=ficha_tecnica)
+                # Guardamos ficha técnica pura en el perfil (regla: se guarda siempre)
+                carta = _carta_por_capa()
+                if capa == "natal":
+                    ficha_pura = e.formatear_ficha_tecnica(carta)
+                else:
+                    ficha_pura = e.formatear_ficha(carta)
+                _save_astro_output(chat_id, nombre, f"{capa}_tecnico", ficha_pura)
+                # Pedir a Claude la interpretación
+                await context.bot.send_message(chat_id=chat_id, text="⏳ Armando la interpretación en criollo para el PDF...")
+                import threading as _th, queue as _q, asyncio
+                _que = _q.Queue()
+                capa_nota = {"natal":"natal","solar":"del retorno solar del año","lunar":"del retorno lunar del mes"}[capa]
+                prompt = (
+                    f"Carta {capa_nota} de {nombre} (natal: {datos['fecha']}, {datos['hora']}, {datos['lugar']}). "
+                    f"Devolveme SOLO la interpretación en criollo argentino COMPLETA — sin tecnicismos — "
+                    f"+ al final una sección 'LECTURA GESTALT' integrada. Sin preámbulos ni markdown raros — "
+                    f"texto plano fluido, organizado en secciones con títulos en mayúscula. "
+                    f"Esto va a ir a PDF — no uses emojis ni caracteres extravagantes. "
+                    f"Calculá la carta primero con las tools correspondientes para basarte en datos reales."
+                )
+                def _run():
+                    try: _que.put(("ok", ask_claude(chat_id, prompt, user_name="Cuki")))
+                    except Exception as ex: _que.put(("err", str(ex)))
+                _t = _th.Thread(target=_run, daemon=True); _t.start()
+                _el = 0
+                while _t.is_alive() and _el < 300:
+                    await asyncio.sleep(4); _el += 4
+                    try: await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+                    except: pass
+                if _t.is_alive():
+                    await context.bot.send_message(chat_id=chat_id, text="Tardó demasiado.")
+                    return
+                st, payload = _que.get_nowait()
+                if st == "err":
+                    await context.bot.send_message(chat_id=chat_id, text=f"Error: {payload}")
+                    return
+                reply_text, _pdf, _extras = payload if isinstance(payload, tuple) else (payload, None, [])
+                # Generar PDF con el texto de la interpretación
+                from scripts.analisis_pista import generar_pdf_pista
+                pdf_path = generar_pdf_pista(
+                    reply_text,
+                    nombre_perfil=nombre,
+                    desde=f"{capa}", hasta="interpretacion",
+                )
                 with open(pdf_path, "rb") as f:
                     await context.bot.send_document(
                         chat_id=chat_id, document=f,
-                        filename=f"carta_{nombre}_{kind}.pdf",
-                        caption=f"Carta {'completa' if ficha_tecnica else 'natal'} de {nombre.title()}",
+                        filename=f"interpretacion_{capa}_{nombre}.pdf",
+                        caption=f"Interpretación {capa} de {nombre.title()} (en criollo + gestalt)",
                     )
                 try: os.unlink(pdf_path)
                 except: pass
-                _save_astro_output(chat_id, nombre, f"{kind}_pdf", "generado")
+                # NO guardar el texto — Opus lo regenera
+                await _send_followup()
+            except Exception as ex:
+                log.error(f"pdfonly error: {ex}")
+                await context.bot.send_message(chat_id=chat_id, text=f"Error: {ex}")
+            return
+
+        # Modo PDF+interpretación: genera PDF técnico + pide a Claude la interpretación
+        if modo == "pdfexpl":
+            try:
+                from modules import swiss_engine as e
+                carta = _carta_por_capa()
+                if capa == "natal":
+                    ficha_pura = e.formatear_ficha_tecnica(carta)
+                else:
+                    ficha_pura = e.formatear_ficha(carta)
+                # Guardar SOLO la ficha técnica pura de la capa elegida
+                _save_astro_output(chat_id, nombre, f"{capa}_tecnico", ficha_pura)
+                # Generar PDF técnico y enviarlo
+                pdf_path = generar_pdf(carta, ficha_tecnica=(capa == "natal"))
+                with open(pdf_path, "rb") as f:
+                    await context.bot.send_document(
+                        chat_id=chat_id, document=f,
+                        filename=f"carta_{nombre}_{capa}.pdf",
+                        caption=f"Ficha técnica {capa} de {nombre.title()}",
+                    )
+                try: os.unlink(pdf_path)
+                except: pass
+                # Pedirle a Claude la interpretación en texto, que no se guarda
+                await context.bot.send_message(chat_id=chat_id, text="⏳ Armando la interpretación en criollo...")
+                import threading as _th, queue as _q, asyncio
+                _que = _q.Queue()
+                capa_nota = {"natal":"natal", "solar":"retorno solar del año", "lunar":"retorno lunar del mes"}[capa]
+                prompt_interp = (
+                    f"Tengo la carta {capa_nota} de {nombre} (natal: {datos['fecha']}, {datos['hora']}, "
+                    f"{datos['lugar']}). Ya tengo la ficha técnica (la mandé como PDF). "
+                    f"Dame una interpretación en criollo argentino — sin tecnicismos "
+                    f"(nada de 'casa', 'cúspide', 'aspecto', 'trígono') + al final una lectura GESTALT "
+                    f"integrada del ecosistema completo. "
+                    + ("Calculá la natal con calcular_carta_natal y después el retorno correspondiente si hace falta. " if capa != "natal" else "")
+                    + "Esta interpretación NO se guarda — se regenera cada vez."
+                )
+                def _run():
+                    try: _que.put(("ok", ask_claude(chat_id, prompt_interp, user_name="Cuki")))
+                    except Exception as ex: _que.put(("err", str(ex)))
+                _t = _th.Thread(target=_run, daemon=True); _t.start()
+                _el = 0
+                while _t.is_alive() and _el < 300:
+                    await asyncio.sleep(4); _el += 4
+                    try: await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+                    except: pass
+                if not _t.is_alive():
+                    st, payload = _que.get_nowait()
+                    if st == "ok":
+                        reply_text, _pdf, _extras = payload if isinstance(payload, tuple) else (payload, None, [])
+                        await send_long_message(context.bot, chat_id, reply_text)
+                        # NO guardar la interpretación — Opus la regenera cuando la pidas
+                await _send_followup()
+            except Exception as ex:
+                log.error(f"PDF+expl error: {ex}")
+                await context.bot.send_message(chat_id=chat_id, text=f"Error: {ex}")
+            return
+
+        # Modo PDF: genera PDF de la capa elegida
+        if modo == "pdf":
+            try:
+                from modules import swiss_engine as e
+                carta = _carta_por_capa()
+                pdf_path = generar_pdf(carta, ficha_tecnica=(capa == "natal"))
+                with open(pdf_path, "rb") as f:
+                    await context.bot.send_document(
+                        chat_id=chat_id, document=f,
+                        filename=f"carta_{nombre}_{capa}.pdf",
+                        caption=f"Ficha {capa} de {nombre.title()}",
+                    )
+                try: os.unlink(pdf_path)
+                except: pass
+                # PDF técnico: sí guardamos la ficha pura asociada como referencia técnica
+                if capa == "natal":
+                    ficha_pura = e.formatear_ficha_tecnica(carta)
+                else:
+                    ficha_pura = e.formatear_ficha(carta)
+                _save_astro_output(chat_id, nombre, f"{capa}_tecnico", ficha_pura)
                 await _send_followup()
             except Exception as ex:
                 log.error(f"PDF render error: {ex}")
                 await context.bot.send_message(chat_id=chat_id, text=f"Error PDF: {ex}")
             return
 
-        # Modo solo técnico: igual al flow original
+        # Modo solo técnico: ficha de la capa como texto
         if modo == "tec":
             import threading as _th, queue as _q
             _que = _q.Queue()
             def _run_tec():
                 try:
                     from modules import swiss_engine as e
-                    carta = e.calc_carta_completa(datos["fecha"], datos["hora"], datos["lugar"])
-                    if ficha_tecnica:
-                        for n, d in carta["planetas"].items():
-                            if "error" not in d:
-                                d["dignidad"] = e.calc_dignidad(n, d["signo"])
-                                d["estado_dinamico"] = e.calc_estado_dinamico(d["speed"], n)
-                        carta["regentes"] = e.calc_regentes(carta["planetas"], carta["casas"])
+                    carta = _carta_por_capa()
+                    if capa == "natal":
                         out = e.formatear_ficha_tecnica(carta)
                     else:
                         out = e.formatear_ficha(carta)
@@ -3802,37 +3973,50 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 MAX = 4000
                 for i in range(0, len(payload), MAX):
                     await context.bot.send_message(chat_id=chat_id, text=payload[i:i+MAX])
-                _save_astro_output(chat_id, nombre, f"{kind}_tecnico", payload)
+                # Técnico puro = sí se guarda en el perfil
+                _save_astro_output(chat_id, nombre, f"{capa}_tecnico", payload)
                 await _send_followup()
             return
 
-        # Modo expl (solo criollo) y tecexpl (técnico anotado + gestalt): usan ask_claude
+        # Modo "tecexpl": primero guardar la ficha técnica pura (data), después pedir
+        # la interpretación al LLM (que NO se guarda — se regenera cada vez).
+        if modo == "tecexpl":
+            try:
+                from modules import swiss_engine as e
+                carta = _carta_por_capa()
+                if capa == "natal":
+                    ficha_pura = e.formatear_ficha_tecnica(carta)
+                else:
+                    ficha_pura = e.formatear_ficha(carta)
+                _save_astro_output(chat_id, nombre, f"{capa}_tecnico", ficha_pura)
+            except Exception as _se:
+                log.error(f"save ficha pura error: {_se}")
+
+        # Modos expl y tecexpl: interpretación vía ask_claude (NO se guarda nunca).
         import threading as _th, queue as _q, asyncio
         _que = _q.Queue()
+        capa_nota = {"natal": "natal", "solar": "del retorno solar (tema del año)",
+                     "lunar": "del retorno lunar (tema del mes)"}[capa]
         if modo == "expl":
             prompt = (
-                f"Tengo la carta natal de {nombre} (fecha {datos['fecha']}, hora {datos['hora']}, "
-                f"lugar {datos['lugar']}). Calculá la carta con calcular_carta_natal primero para basarte en "
-                f"datos reales. Después dame SOLO una explicación COMPLETA en criollo argentino, sin NINGÚN "
-                f"término astrológico técnico: nada de 'casa', 'cúspide', 'aspecto', 'trígono', 'cuadratura', "
-                f"'regente', 'plenivalencia', 'retrógrado', 'conjunción', 'oposición', 'sextil'. Describí cómo "
-                f"es la persona, qué le toca, qué le fluye, qué le cuesta, con ejemplos cotidianos. Al final, "
-                f"una lectura GESTALT de cómo funcionan todas las piezas combinadas como un ecosistema vivo — "
-                f"no cada pieza por separado, sino la foto completa integrada."
+                f"Tengo la carta {capa_nota} de {nombre} (natal: {datos['fecha']}, {datos['hora']}, "
+                f"{datos['lugar']}). Calculá la carta con las tools correspondientes primero. "
+                f"Dame SOLO una explicación COMPLETA en criollo argentino, sin NINGÚN término "
+                f"astrológico técnico: nada de 'casa', 'cúspide', 'aspecto', 'trígono', 'cuadratura', "
+                f"'regente', 'plenivalencia', 'retrógrado', 'conjunción', 'oposición', 'sextil'. "
+                f"Ejemplos cotidianos. Al final, una lectura GESTALT integrada del ecosistema. "
+                f"Esta interpretación NO se guarda — se regenera cada vez que el user pide."
             )
         else:  # tecexpl
             prompt = (
-                f"Tengo la carta natal de {nombre} (fecha {datos['fecha']}, hora {datos['hora']}, "
-                f"lugar {datos['lugar']}). Flujo obligatorio:\n"
-                f"1) Calculá la carta con calcular_carta_natal (usá ficha_tecnica=true).\n"
-                f"2) Armá el output así: para CADA sección/aspecto/planeta/casa que muestre el técnico, "
-                f"debajo (identado) agregás una explicación corta en criollo argentino SIN tecnicismos "
-                f"astrológicos — qué significa en la vida real, con ejemplos cotidianos.\n"
-                f"3) Al FINAL de todo, una sección '🔱 LECTURA GESTALT' con una interpretación integrada "
-                f"de cómo funcionan TODAS las piezas juntas como ecosistema vivo — el contrato central, "
-                f"las tensiones estructurales, los recursos, qué se activa con qué. No te quedes en "
-                f"lista de aspectos — integrá.\n"
-                f"Aplicá las reglas estocásticas del RAG (orbes por velocidad, plenivalencia)."
+                f"Tengo la carta {capa_nota} de {nombre} (natal: {datos['fecha']}, {datos['hora']}, "
+                f"{datos['lugar']}). Flujo:\n"
+                f"1) Calculá la carta con las tools correspondientes (natal/solar/lunar según capa).\n"
+                f"2) Armá el output: para CADA sección/aspecto/planeta/casa del técnico, debajo "
+                f"(identado) una explicación corta en criollo argentino SIN tecnicismos.\n"
+                f"3) Al FINAL: sección '🔱 LECTURA GESTALT' con interpretación integrada del "
+                f"ecosistema — no lista, INTEGRÁ.\n"
+                f"Aplicá reglas estocásticas del RAG. Esta interpretación NO se guarda."
             )
         def _run_claude():
             try: _que.put(("ok", ask_claude(chat_id, prompt, user_name="Cuki")))
@@ -3852,7 +4036,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             reply_text, _pdf, _extras = payload if isinstance(payload, tuple) else (payload, None, [])
             await send_long_message(context.bot, chat_id, reply_text)
-            _save_astro_output(chat_id, nombre, f"{kind}_{modo}", reply_text)
+            # NO guardar: la interpretación la regenera Opus cada vez
             await _send_followup()
         return
 
