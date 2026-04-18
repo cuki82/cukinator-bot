@@ -762,3 +762,136 @@ def formatear_ficha_tecnica(carta: dict) -> str:
     lines.append(f"* Flags SWE           : {d['flags_swe']} (SEFLG_MOSEPH)")
 
     return "\n".join(lines)
+
+
+# ── 10. Tránsitos ────────────────────────────────────────────────────────────────
+# Tránsitos = aspectos entre planetas en movimiento HOY (o fecha dada) contra los
+# planetas natales fijos de la carta. Orbes mucho más chicos que natal (1-2°) —
+# un tránsito "activo" es exacto; uno con orb 5° es débil o ya se fue.
+
+TRANSIT_ASPECTS = [
+    (0,   "Conjuncion",  "☌", 2.0),
+    (60,  "Sextil",      "⚹", 1.5),
+    (90,  "Cuadratura",  "□", 2.0),
+    (120, "Trigono",     "△", 2.0),
+    (180, "Oposicion",   "☍", 2.0),
+]
+
+# Planetas lentos tienen tránsitos más significativos (duran meses/años).
+TRANSIT_WEIGHT = {
+    "Sol": 1, "Luna": 1, "Mercurio": 1, "Venus": 1, "Marte": 2,
+    "Jupiter": 3, "Saturno": 4, "Urano": 5, "Neptuno": 5, "Pluton": 5,
+    "Nodo Norte": 3, "Quiron": 2,
+}
+
+
+def _julian_ahora_ut() -> float:
+    """JD UT del momento actual."""
+    now = datetime.datetime.utcnow()
+    return swe.julday(now.year, now.month, now.day,
+                      now.hour + now.minute / 60.0 + now.second / 3600.0)
+
+
+def _jd_from_fecha(fecha: str = None, hora: str = None) -> float:
+    """JD UT desde 'DD/MM/AAAA HH:MM' (asume UTC) o ahora si falta."""
+    if not fecha:
+        return _julian_ahora_ut()
+    hora = hora or "12:00"
+    dt = datetime.datetime.strptime(f"{fecha} {hora}", "%d/%m/%Y %H:%M")
+    return swe.julday(dt.year, dt.month, dt.day,
+                      dt.hour + dt.minute / 60.0)
+
+
+def calc_transitos(carta_natal: dict, fecha: str = None, hora: str = None,
+                   orb_multiplier: float = 1.0, solo_mayores: bool = True) -> dict:
+    """
+    Calcula los tránsitos (planetas actuales formando aspectos con natal).
+
+    Args:
+        carta_natal: output de calc_carta_completa() — necesita carta['planetas']
+        fecha: 'DD/MM/AAAA' — si None, usa AHORA (UTC)
+        hora:  'HH:MM' — UTC; default '12:00' o hora actual
+        orb_multiplier: 1.0 default. Subir a 2.0 para ver aspectos "próximos" o
+                        bajar a 0.5 para solo tránsitos exactos.
+        solo_mayores: si True (default), solo aspectos mayores (cnj, sxt, cuad, trig, opp).
+
+    Returns:
+        {
+            "jd_transito": float,
+            "fecha_transito": str,
+            "planetas_transito": {nombre: {lon, signo, speed, retrogrado}, ...},
+            "aspectos": [
+                {planeta_transito, planeta_natal, aspecto, simbolo, angulo,
+                 orb, aplicante, peso, significancia},
+                ...
+            ] ordenados por significancia (peso del planeta × exactitud del orb)
+        }
+
+    Uso típico:
+        natal = calc_carta_completa("23/09/1985", "14:30", "Buenos Aires")
+        trans = calc_transitos(natal)  # tránsitos de ahora
+        for a in trans["aspectos"][:5]:
+            print(f"{a['planeta_transito']} {a['simbolo']} {a['planeta_natal']} natal (orb {a['orb']}°)")
+    """
+    jd_trans = _jd_from_fecha(fecha, hora)
+    planetas_trans = calc_planets(jd_trans)
+
+    natal_planetas = carta_natal.get("planetas", {})
+    aspectos_def = TRANSIT_ASPECTS if solo_mayores else ASPECTOS_DEF
+
+    aspectos = []
+    for nt, dt in planetas_trans.items():
+        if "error" in dt:
+            continue
+        for nn, dn in natal_planetas.items():
+            if "error" in dn:
+                continue
+            diff = abs(dt["lon"] - dn["lon"]) % 360
+            diff = min(diff, 360 - diff)
+            for angulo, nombre_asp, simbolo, orb_base in aspectos_def:
+                orb_max = orb_base * orb_multiplier
+                orb_real = abs(diff - angulo)
+                if orb_real <= orb_max:
+                    peso = TRANSIT_WEIGHT.get(nt, 1)
+                    # Significancia: planetas lentos + aspectos exactos primero
+                    significancia = peso * (1 - orb_real / max(orb_max, 0.01))
+                    aspectos.append({
+                        "planeta_transito": nt,
+                        "planeta_natal":    nn,
+                        "aspecto":          nombre_asp,
+                        "simbolo":          simbolo,
+                        "angulo":           angulo,
+                        "orb":              round(orb_real, 2),
+                        "aplicante":        dt["speed"] > 0,
+                        "peso":             peso,
+                        "significancia":    round(significancia, 2),
+                    })
+
+    aspectos.sort(key=lambda a: -a["significancia"])
+
+    return {
+        "jd_transito":        jd_trans,
+        "fecha_transito":     fecha or datetime.datetime.utcnow().strftime("%d/%m/%Y %H:%M UTC"),
+        "planetas_transito":  planetas_trans,
+        "aspectos":           aspectos,
+    }
+
+
+def formatear_transitos(transitos: dict, carta_natal: dict = None, top_n: int = 15) -> str:
+    """Render de tránsitos para Telegram/PDF."""
+    lines = [f"🪐 *Tránsitos al {transitos['fecha_transito']}*\n"]
+    aspectos = transitos.get("aspectos", [])
+    if not aspectos:
+        lines.append("_(sin aspectos dentro del orb actual)_")
+        return "\n".join(lines)
+
+    for a in aspectos[:top_n]:
+        apl = "→ aplicante" if a["aplicante"] else "← separándose"
+        lines.append(
+            f"• *{a['planeta_transito']}* {a['simbolo']} {a['planeta_natal']} natal · "
+            f"orb {a['orb']}° · {apl}"
+        )
+
+    if len(aspectos) > top_n:
+        lines.append(f"\n_… y {len(aspectos) - top_n} aspectos más de orb mayor._")
+    return "\n".join(lines)
