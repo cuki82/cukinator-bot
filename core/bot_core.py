@@ -3695,8 +3695,186 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await menu_opciones_persona(query, nombre)
 
     elif data.startswith("astro:natal:") or data.startswith("astro:ficha:"):
+        # Ahora primero preguntamos el formato antes de ejecutar.
+        # 3 modos + PDF + volver.
         nombre = data.split(":", 2)[2]
         ficha_tecnica = data.startswith("astro:ficha:")
+        kind = "ficha" if ficha_tecnica else "natal"
+        titulo = "Ficha técnica completa" if ficha_tecnica else "Ficha natal"
+        botones = [
+            [InlineKeyboardButton("📊 Técnico + explicación + gestalt", callback_data=f"astro:render:{kind}:tecexpl:{nombre}")],
+            [InlineKeyboardButton("💬 Solo explicación en criollo",     callback_data=f"astro:render:{kind}:expl:{nombre}")],
+            [InlineKeyboardButton("🔬 Solo técnico (data pura)",         callback_data=f"astro:render:{kind}:tec:{nombre}")],
+            [InlineKeyboardButton("📄 PDF técnico",                      callback_data=f"astro:render:{kind}:pdf:{nombre}")],
+            [InlineKeyboardButton("← Volver",                            callback_data=f"astro:ver:{nombre}")],
+        ]
+        await query.edit_message_text(
+            f"*{titulo} de {nombre.title()}*\n\n¿Cómo la querés?",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(botones),
+        )
+
+    elif data.startswith("astro:render:"):
+        # astro:render:<kind>:<modo>:<nombre>
+        parts = data.split(":", 4)
+        kind, modo, nombre = parts[2], parts[3], parts[4]
+        ficha_tecnica = (kind == "ficha")
+        await query.edit_message_text(f"⏳ Generando {nombre.title()} ({modo})...")
+        datos = astro_recuperar(chat_id, nombre)
+        if not datos:
+            await context.bot.send_message(chat_id=chat_id, text=f"No encontré carta de {nombre.title()}.")
+            return
+
+        # Helper: enviar follow-up con menú contextual al final
+        async def _send_followup():
+            botones_fu = [
+                [InlineKeyboardButton("🪐 Ver tránsitos", callback_data=f"astro:transitos:{nombre}")],
+                [InlineKeyboardButton("💼 Desde una perspectiva", callback_data=f"astro:perspectiva:{kind}:{nombre}")],
+                [InlineKeyboardButton("📄 Generar PDF",   callback_data=f"astro:pdf:{kind}:{nombre}")],
+                [InlineKeyboardButton("💾 Marcar como referencia", callback_data=f"astro:ref:{kind}:{nombre}")],
+                [InlineKeyboardButton("Así está bien",    callback_data="astro:cerrar")],
+            ]
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="¿Algo más con esto?",
+                reply_markup=InlineKeyboardMarkup(botones_fu),
+            )
+
+        # Modo PDF: igual al callback astro:pdf existente, dirigido acá
+        if modo == "pdf":
+            try:
+                from modules import swiss_engine as e
+                carta = e.calc_carta_completa(datos["fecha"], datos["hora"], datos["lugar"])
+                if ficha_tecnica:
+                    for n, d in carta["planetas"].items():
+                        if "error" not in d:
+                            d["dignidad"] = e.calc_dignidad(n, d["signo"])
+                            d["estado_dinamico"] = e.calc_estado_dinamico(d["speed"], n)
+                    carta["regentes"] = e.calc_regentes(carta["planetas"], carta["casas"])
+                pdf_path = generar_pdf(carta, ficha_tecnica=ficha_tecnica)
+                with open(pdf_path, "rb") as f:
+                    await context.bot.send_document(
+                        chat_id=chat_id, document=f,
+                        filename=f"carta_{nombre}_{kind}.pdf",
+                        caption=f"Carta {'completa' if ficha_tecnica else 'natal'} de {nombre.title()}",
+                    )
+                try: os.unlink(pdf_path)
+                except: pass
+                _save_astro_output(chat_id, nombre, f"{kind}_pdf", "generado")
+                await _send_followup()
+            except Exception as ex:
+                log.error(f"PDF render error: {ex}")
+                await context.bot.send_message(chat_id=chat_id, text=f"Error PDF: {ex}")
+            return
+
+        # Modo solo técnico: igual al flow original
+        if modo == "tec":
+            import threading as _th, queue as _q
+            _que = _q.Queue()
+            def _run_tec():
+                try:
+                    from modules import swiss_engine as e
+                    carta = e.calc_carta_completa(datos["fecha"], datos["hora"], datos["lugar"])
+                    if ficha_tecnica:
+                        for n, d in carta["planetas"].items():
+                            if "error" not in d:
+                                d["dignidad"] = e.calc_dignidad(n, d["signo"])
+                                d["estado_dinamico"] = e.calc_estado_dinamico(d["speed"], n)
+                        carta["regentes"] = e.calc_regentes(carta["planetas"], carta["casas"])
+                        out = e.formatear_ficha_tecnica(carta)
+                    else:
+                        out = e.formatear_ficha(carta)
+                    _que.put(("ok", out))
+                except Exception as ex:
+                    _que.put(("err", str(ex)))
+            _t = _th.Thread(target=_run_tec, daemon=True); _t.start()
+            import asyncio
+            _el = 0
+            while _t.is_alive() and _el < 120:
+                await asyncio.sleep(3); _el += 3
+            if _t.is_alive():
+                await context.bot.send_message(chat_id=chat_id, text="Tardó demasiado.")
+                return
+            st, payload = _que.get_nowait()
+            if st == "err":
+                await context.bot.send_message(chat_id=chat_id, text=f"Error: {payload}")
+            else:
+                MAX = 4000
+                for i in range(0, len(payload), MAX):
+                    await context.bot.send_message(chat_id=chat_id, text=payload[i:i+MAX])
+                _save_astro_output(chat_id, nombre, f"{kind}_tecnico", payload)
+                await _send_followup()
+            return
+
+        # Modo expl (solo criollo) y tecexpl (técnico anotado + gestalt): usan ask_claude
+        import threading as _th, queue as _q, asyncio
+        _que = _q.Queue()
+        if modo == "expl":
+            prompt = (
+                f"Tengo la carta natal de {nombre} (fecha {datos['fecha']}, hora {datos['hora']}, "
+                f"lugar {datos['lugar']}). Calculá la carta con calcular_carta_natal primero para basarte en "
+                f"datos reales. Después dame SOLO una explicación COMPLETA en criollo argentino, sin NINGÚN "
+                f"término astrológico técnico: nada de 'casa', 'cúspide', 'aspecto', 'trígono', 'cuadratura', "
+                f"'regente', 'plenivalencia', 'retrógrado', 'conjunción', 'oposición', 'sextil'. Describí cómo "
+                f"es la persona, qué le toca, qué le fluye, qué le cuesta, con ejemplos cotidianos. Al final, "
+                f"una lectura GESTALT de cómo funcionan todas las piezas combinadas como un ecosistema vivo — "
+                f"no cada pieza por separado, sino la foto completa integrada."
+            )
+        else:  # tecexpl
+            prompt = (
+                f"Tengo la carta natal de {nombre} (fecha {datos['fecha']}, hora {datos['hora']}, "
+                f"lugar {datos['lugar']}). Flujo obligatorio:\n"
+                f"1) Calculá la carta con calcular_carta_natal (usá ficha_tecnica=true).\n"
+                f"2) Armá el output así: para CADA sección/aspecto/planeta/casa que muestre el técnico, "
+                f"debajo (identado) agregás una explicación corta en criollo argentino SIN tecnicismos "
+                f"astrológicos — qué significa en la vida real, con ejemplos cotidianos.\n"
+                f"3) Al FINAL de todo, una sección '🔱 LECTURA GESTALT' con una interpretación integrada "
+                f"de cómo funcionan TODAS las piezas juntas como ecosistema vivo — el contrato central, "
+                f"las tensiones estructurales, los recursos, qué se activa con qué. No te quedes en "
+                f"lista de aspectos — integrá.\n"
+                f"Aplicá las reglas estocásticas del RAG (orbes por velocidad, plenivalencia)."
+            )
+        def _run_claude():
+            try: _que.put(("ok", ask_claude(chat_id, prompt, user_name="Cuki")))
+            except Exception as ex: _que.put(("err", str(ex)))
+        _t = _th.Thread(target=_run_claude, daemon=True); _t.start()
+        _el = 0
+        while _t.is_alive() and _el < 300:
+            await asyncio.sleep(4); _el += 4
+            try: await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+            except: pass
+        if _t.is_alive():
+            await context.bot.send_message(chat_id=chat_id, text="Tardó demasiado, probá de nuevo.")
+            return
+        st, payload = _que.get_nowait()
+        if st == "err":
+            await context.bot.send_message(chat_id=chat_id, text=f"Error: {payload}")
+        else:
+            reply_text, _pdf, _extras = payload if isinstance(payload, tuple) else (payload, None, [])
+            await send_long_message(context.bot, chat_id, reply_text)
+            _save_astro_output(chat_id, nombre, f"{kind}_{modo}", reply_text)
+            await _send_followup()
+        return
+
+    elif data.startswith("astro:ref:"):
+        # Marca el último output como "referencia" (facts memory)
+        parts = data.split(":", 3)
+        kind, nombre = parts[2], parts[3]
+        try:
+            con = sqlite3.connect(DB_PATH)
+            con.execute("""
+                UPDATE astro_outputs SET tipo = tipo || '_REF'
+                WHERE id = (SELECT id FROM astro_outputs WHERE chat_id=? AND nombre=? ORDER BY id DESC LIMIT 1)
+            """, (chat_id, nombre.lower()))
+            con.commit(); con.close()
+            await query.edit_message_text(f"✅ Marcada como referencia en el perfil de {nombre.title()}.")
+        except Exception as ex:
+            await query.edit_message_text(f"Error: {ex}")
+
+    elif data.startswith("astro:natal_old:") or data.startswith("astro:ficha_old:"):
+        # dead code path - mantenido por compat con mensajes antiguos
+        nombre = data.split(":", 2)[2]
+        ficha_tecnica = data.startswith("astro:ficha_old:")
         await query.edit_message_text(f"Calculando carta de {nombre.title()}...")
         datos = astro_recuperar(chat_id, nombre)
         if not datos:
@@ -3899,6 +4077,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("☀️ Sobre la Solar (año)",      callback_data=f"astro:trans_solar:{nombre}")],
             [InlineKeyboardButton("🌙 Sobre la Lunar (mes)",      callback_data=f"astro:trans_lunar:{nombre}")],
             [InlineKeyboardButton("🔱 Triple capa (jerarquía)",   callback_data=f"astro:trans_triple:{nombre}")],
+            [InlineKeyboardButton("🌌 Cielo del día (sin natal)", callback_data=f"astro:cielo:{nombre}")],
             [InlineKeyboardButton("← Volver",                     callback_data=f"astro:ver:{nombre}")],
         ]
         await query.edit_message_text(
@@ -3906,10 +4085,45 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• *Natal* — mapa base permanente\n"
             "• *Solar* — tema del año (última revolución solar)\n"
             "• *Lunar* — tema del mes (última revolución lunar)\n"
-            "• *Triple capa* — activaciones en las 3 con jerarquía (natal → solar → lunar)",
+            "• *Triple capa* — activaciones en las 3 con jerarquía (natal → solar → lunar)\n"
+            "• *Cielo del día* — solo posiciones de los planetas hoy (grado, signo, D/R), sin comparar con tu carta",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(botones),
         )
+
+    elif data.startswith("astro:cielo:"):
+        # Posiciones del cielo del día sin referenciar carta natal.
+        # Solo grado + signo + speed + D/R de cada planeta, tal cual están hoy.
+        nombre = data.split(":", 2)[2]
+        await query.edit_message_text(f"⏳ Foto del cielo de hoy...")
+        try:
+            from modules import swiss_engine as e
+            import swisseph as _swe
+            import datetime as _dt
+            now = _dt.datetime.utcnow()
+            jd = _swe.julday(now.year, now.month, now.day,
+                             now.hour + now.minute/60.0 + now.second/3600.0)
+            planetas = e.calc_planets(jd)
+            lines = [f"🌌 *Cielo del día — {now.strftime('%Y-%m-%d %H:%M UTC')}*\n"]
+            lines.append("_Foto pura del cielo. No compara con ninguna carta natal._\n")
+            orden = ["Sol","Luna","Mercurio","Venus","Marte","Jupiter","Saturno","Urano","Neptuno","Pluton","Nodo Norte","Quiron"]
+            for n in orden:
+                p = planetas.get(n, {})
+                if "error" in p: continue
+                dr = "R" if p.get("speed",0) < 0 else "D"
+                signo = p.get("signo","?")
+                speed = p.get("speed",0)
+                lines.append(f"• *{n:12s}* {signo}  ({dr})  speed {speed:+.3f}°/día")
+            # Alerta Luna cambio signo
+            luna_lon = planetas.get("Luna",{}).get("lon",0) % 30
+            if luna_lon >= 28:
+                lines.append(f"\n⚠️ *ALERTA*: Luna a {30 - luna_lon:.2f}° del cambio de signo")
+            output = "\n".join(lines)
+            await query.edit_message_text(output, parse_mode="Markdown")
+            _save_astro_output(chat_id, nombre, "cielo_del_dia", output)
+        except Exception as ex:
+            log.error(f"Cielo del día error: {ex}")
+            await query.edit_message_text(f"Error: {ex}")
 
     elif data.startswith("astro:trans_natal:") or data.startswith("astro:trans_solar:") or data.startswith("astro:trans_lunar:"):
         target = data.split(":", 2)[1].replace("trans_", "")  # natal | solar | lunar
