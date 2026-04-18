@@ -34,11 +34,107 @@ except ImportError:
     async def send_coding_task(t, c): return {"status": "error", "summary": "Worker no disponible"}
 
 
+# ── Detección automática de API keys pegadas en el chat ───────────────────────
+# Intenta match ordenado por especificidad. El primero que matchee gana para ese
+# trozo de texto. El bot escribe directo al vault (corre en el mismo VPS) — la
+# key nunca se loguea, nunca llega al LLM, nunca queda en el history del chat.
+
+import re as _re_cred
+
+_CREDENTIAL_PATTERNS = [
+    # (regex, vault_key_name, service_display_name)
+    (r"sk-ant-api\d{2}-[A-Za-z0-9_\-]{60,}",       "ANTHROPIC_KEY",     "Anthropic API"),
+    (r"sk-proj-[A-Za-z0-9_\-]{80,}",                "OPENAI_API_KEY",    "OpenAI (project)"),
+    (r"sk-[A-Za-z0-9]{40,}",                        "OPENAI_API_KEY",    "OpenAI (legacy)"),
+    (r"github_pat_[A-Za-z0-9_]{50,}",               "GITHUB_TOKEN",      "GitHub PAT fine-grained"),
+    (r"ghp_[A-Za-z0-9]{30,}",                       "GITHUB_TOKEN",      "GitHub PAT classic"),
+    (r"xoxb-\d+-\d+-[A-Za-z0-9]+",                  "SLACK_BOT_TOKEN",   "Slack bot"),
+    (r"AKIA[A-Z0-9]{16}",                           "AWS_ACCESS_KEY_ID", "AWS access key"),
+    (r"xai-[A-Za-z0-9]{40,}",                       "XAI_API_KEY",       "xAI"),
+    (r"gsk_[A-Za-z0-9]{40,}",                       "GROQ_API_KEY",      "Groq"),
+    (r"AIza[A-Za-z0-9_\-]{35}",                     "GOOGLE_API_KEY",    "Google"),
+    (r"eyJ[A-Za-z0-9_\-]{20,}\.[A-Za-z0-9_\-]{20,}\.[A-Za-z0-9_\-]{20,}", "JWT_TOKEN", "JWT"),
+]
+
+
+def _mask_cred(value: str) -> str:
+    """Muestra primeros 10 y últimos 4 chars, el resto oculto."""
+    if len(value) <= 18:
+        return value[:4] + "…" + value[-2:]
+    return value[:10] + "…" + value[-4:]
+
+
+def _detect_credentials(text: str) -> list:
+    """Busca API keys conocidas en el texto. Retorna lista de (vault_key, value, service)."""
+    if not text:
+        return []
+    found = []
+    seen_values = set()
+    for pattern, vault_key, service in _CREDENTIAL_PATTERNS:
+        for m in _re_cred.finditer(pattern, text):
+            v = m.group(0)
+            if v in seen_values:
+                continue
+            seen_values.add(v)
+            found.append((vault_key, v, service))
+    return found
+
+
+async def _handle_credential_paste(update, _context, user_msg: str) -> bool:
+    """Si el mensaje contiene API keys, las guarda al vault del VPS y responde.
+    El bot corre en el mismo VPS → escribe directo, sin SSH ni worker ni LLM.
+    Retorna True si consumió el mensaje (el caller debe return)."""
+    creds = _detect_credentials(user_msg)
+    if not creds:
+        return False
+
+    chat_id = update.effective_chat.id
+    log.info(f"[{chat_id}] Detectadas {len(creds)} credencial(es), guardando al vault")
+
+    try:
+        from services.vault import set as vault_set
+    except Exception as e:
+        await update.message.reply_text(
+            f"🔐 Detecté {len(creds)} credencial(es) pero no pude abrir el vault: {e}"
+        )
+        return True
+
+    saved_lines = []
+    for vault_key, value, service in creds:
+        try:
+            vault_set(vault_key, value)
+            saved_lines.append(f"• *{service}* → `{vault_key}` ({_mask_cred(value)})")
+            log.info(f"[{chat_id}] vault: {vault_key} guardada (len={len(value)})")
+        except Exception as e:
+            saved_lines.append(f"• *{service}* → ❌ error: {e}")
+            log.error(f"[{chat_id}] vault set {vault_key} falló: {e}")
+
+    msg = (
+        "🔐 *Credencial detectada y guardada en el vault del VPS*\n\n"
+        + "\n".join(saved_lines)
+        + "\n\n━━━━━━━━━━━━━━━━━━━\n"
+        "🛡️ *Qué hice:*\n"
+        "• Escribí al vault Fernet encriptado (no tocó el LLM, no queda en el history)\n"
+        "• El próximo restart del worker / bot la levanta automáticamente\n\n"
+        "⚠️ *Recomendación:* esta key ya pasó por el chat — **rotala ahora** "
+        "en el dashboard del servicio. Cuando tengas la nueva, pegámela acá "
+        "y se guarda sola, sin vueltas."
+    )
+    await update.message.reply_text(msg, parse_mode="Markdown")
+    return True
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     import asyncio, io, threading, queue
     chat_id  = update.effective_chat.id
     user_msg = update.message.text
     name     = update.effective_user.first_name or "Usuario"
+
+    # Detección de credenciales — DEBE ir antes del log para evitar filtrar la
+    # key en journalctl. Si se detecta key, el handler escribe al vault, responde
+    # al user, y retorna sin pasar por el LLM ni guardar en el history.
+    if await _handle_credential_paste(update, context, user_msg):
+        return
 
     # (sin buffer)
 
