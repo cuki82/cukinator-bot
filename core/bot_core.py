@@ -1813,7 +1813,7 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
 
                     elif block.name == "astro_ver_perfil":
                         try:
-                            import time, gc
+                            import gc  # time ya está importado al top-level
                             nombre = block.input["nombre"]
                             datos  = astro_recuperar(chat_id, nombre)
                             if not datos:
@@ -1849,7 +1849,7 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
 
                     elif block.name == "calcular_carta_natal":
                         try:
-                            import time, gc
+                            import gc  # time ya está importado al top-level
                             carta = calcular_carta(block.input["fecha"], block.input["hora"], block.input["lugar"])
                             time.sleep(0.5)
                             if block.input.get("ficha_tecnica", False):
@@ -2464,7 +2464,7 @@ async def send_long_message(bot, chat_id: int, text: str, reply_to=None, chunk_s
                     await bot.send_message(chat_id=chat_id, text=plain)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    import asyncio, io, threading, queue, time
+    import asyncio, io, threading, queue  # time ya está importado al top-level
     chat_id  = update.effective_chat.id
     user_msg = update.message.text
     name     = update.effective_user.first_name or "Usuario"
