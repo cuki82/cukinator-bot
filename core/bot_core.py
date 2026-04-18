@@ -1689,7 +1689,38 @@ def get_system_prompt(user_name: str = None, chat_id: int = None) -> str:
             "Podés conversar, buscar en internet, hacer cartas natales, responder sobre clima y hora."
         )
 
+    # Per-tenant override: si el chat_id resuelve a un tenant con system_prompt
+    # custom en shared.tenants, lo agregamos al final. Esto permite que cada
+    # tenant (Reamerica, heladería, broker) tenga su identidad/tono propio
+    # sin tocar el prompt base del bot.
+    if chat_id:
+        try:
+            from services.tenants import resolve_tenant, get_tenant_config
+            tenant_slug = resolve_tenant(chat_id)
+            tcfg = get_tenant_config(tenant_slug)
+            if tcfg.get("system_prompt"):
+                prompt += f"\n\n━━━ IDENTIDAD DEL TENANT ({tenant_slug}) ━━━\n{tcfg['system_prompt']}"
+        except Exception as _tpe:
+            log.debug(f"tenant prompt skip: {_tpe}")
+
     return prompt
+
+
+def get_tenant_tools_filter(chat_id: int) -> set:
+    """Retorna el set de tool names permitidos para el tenant, o set() si no hay
+    restricción (todas permitidas). Usa shared.tenants.settings.tools_enabled."""
+    if not chat_id:
+        return set()
+    try:
+        from services.tenants import resolve_tenant, get_tenant_config
+        tenant_slug = resolve_tenant(chat_id)
+        tcfg = get_tenant_config(tenant_slug)
+        enabled = (tcfg.get("settings") or {}).get("tools_enabled")
+        if isinstance(enabled, list) and enabled:
+            return set(enabled)
+    except Exception:
+        pass
+    return set()
 
 def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice: bool = False) -> tuple:
     """Retorna (respuesta_texto, pdf_path_o_None, archivos_extra)
@@ -1728,11 +1759,17 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
         "config_guardar",         # escribe config versionada
     }
 
+    # Per-tenant tool whitelist: si el tenant declaró tools_enabled en su
+    # settings, filtrar al set (+ siempre incluir las utility básicas).
+    _tenant_whitelist = get_tenant_tools_filter(chat_id)
+    _always_on = {"get_time", "get_weather"}  # utility universales, nunca filtrar
+
     tools_activos = [
         t for t in TOOLS
         if (allow_voice or t["name"] != "enviar_voz")
         and (is_owner or t["name"] not in OWNER_ONLY_TOOLS)
         and t["name"] not in NEVER_LLM_TOOLS
+        and (not _tenant_whitelist or t["name"] in _tenant_whitelist or t["name"] in _always_on)
     ]
 
     # Límite dinámico según complejidad del mensaje

@@ -217,6 +217,95 @@ async def handle_vault_callback(update, context):
         )
 
 
+async def cmd_tenant(update, context):
+    """Administración de tenants (solo owner).
+
+    /tenant list
+    /tenant info <slug>
+    /tenant set_prompt <slug> <texto del system prompt>
+    /tenant set_tools <slug> <tool1,tool2,tool3>
+    /tenant set_lang <slug> <es-AR|en-US|...>
+    /tenant link <slug> <chat_id>
+    """
+    from core.bot_core import OWNER_CHAT_ID
+    chat_id = update.effective_chat.id
+    if chat_id != OWNER_CHAT_ID:
+        await update.message.reply_text("🚫 Solo el owner administra tenants.")
+        return
+    args = context.args or []
+    if not args:
+        await update.message.reply_text(
+            "*Uso:*\n"
+            "`/tenant list`\n"
+            "`/tenant info <slug>`\n"
+            "`/tenant set_prompt <slug> <texto>`\n"
+            "`/tenant set_tools <slug> <tool1,tool2,...>`\n"
+            "`/tenant set_lang <slug> <es-AR>`\n"
+            "`/tenant link <slug> <chat_id>`",
+            parse_mode="Markdown",
+        )
+        return
+
+    try:
+        from services.tenants import list_tenants, get_tenant_config, set_tenant_config, link_chat_to_tenant
+    except Exception as e:
+        await update.message.reply_text(f"Error: {e}")
+        return
+
+    sub = args[0]
+    try:
+        if sub == "list":
+            tenants = list_tenants()
+            if not tenants:
+                await update.message.reply_text("Sin tenants.")
+                return
+            lines = ["*Tenants:*"]
+            for t in tenants:
+                lines.append(f"• `{t['slug']}` — {t['name']} · {t.get('email') or '—'}")
+            await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+        elif sub == "info" and len(args) >= 2:
+            slug = args[1]
+            cfg = get_tenant_config(slug)
+            sp = cfg.get("system_prompt") or "(sin override)"
+            st = cfg.get("settings") or {}
+            await update.message.reply_text(
+                f"*Tenant `{slug}`*\n"
+                f"idioma: `{cfg.get('display_language')}`\n"
+                f"tools_enabled: `{st.get('tools_enabled') or 'todas'}`\n"
+                f"system_prompt override:\n```\n{sp[:500]}\n```",
+                parse_mode="Markdown",
+            )
+
+        elif sub == "set_prompt" and len(args) >= 3:
+            slug = args[1]; prompt = " ".join(args[2:])
+            set_tenant_config(slug, system_prompt=prompt)
+            await update.message.reply_text(f"✅ System prompt actualizado para `{slug}` ({len(prompt)} chars).", parse_mode="Markdown")
+
+        elif sub == "set_tools" and len(args) >= 3:
+            slug = args[1]; tools = [t.strip() for t in args[2].split(",") if t.strip()]
+            cfg = get_tenant_config(slug)
+            new_settings = dict(cfg.get("settings") or {})
+            new_settings["tools_enabled"] = tools
+            set_tenant_config(slug, settings=new_settings)
+            await update.message.reply_text(f"✅ Tools whitelist para `{slug}`: {tools}", parse_mode="Markdown")
+
+        elif sub == "set_lang" and len(args) >= 3:
+            slug = args[1]; lang = args[2]
+            set_tenant_config(slug, display_language=lang)
+            await update.message.reply_text(f"✅ Idioma de `{slug}` → `{lang}`", parse_mode="Markdown")
+
+        elif sub == "link" and len(args) >= 3:
+            slug = args[1]; new_chat = int(args[2])
+            link_chat_to_tenant(new_chat, slug)
+            await update.message.reply_text(f"✅ chat_id `{new_chat}` ↔ tenant `{slug}`", parse_mode="Markdown")
+
+        else:
+            await update.message.reply_text("Subcomando no reconocido. Mandá `/tenant` sin args para ver la ayuda.")
+    except Exception as e:
+        await update.message.reply_text(f"Error: {e}")
+
+
 async def cmd_setvault(update, context):
     """Comando /setvault <KEY> <value> — guarda al vault con confirmación inline.
     Reconocido como command antes que cualquier LLM toque el mensaje. Solo

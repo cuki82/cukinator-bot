@@ -160,6 +160,57 @@ def add_tenant(slug: str, display_name: str, owner_email: Optional[str] = None) 
     return {"slug": slug, "name": display_name, "schema": slug}
 
 
+def get_tenant_config(tenant_slug: str) -> dict:
+    """Devuelve la config del tenant: system_prompt, display_language, settings.
+    Config default si hay error o el tenant no existe."""
+    default = {"system_prompt": None, "display_language": "es-AR", "settings": {}}
+    if not tenant_slug:
+        return default
+    if pg_available():
+        try:
+            with pg_conn() as con:
+                with con.cursor() as cur:
+                    cur.execute("""
+                        SELECT system_prompt, display_language, settings
+                        FROM shared.tenants WHERE slug = %s
+                    """, (tenant_slug,))
+                    row = cur.fetchone()
+                    if row:
+                        return {
+                            "system_prompt":    row[0],
+                            "display_language": row[1] or "es-AR",
+                            "settings":         row[2] if isinstance(row[2], dict) else {},
+                        }
+        except Exception as e:
+            log.warning(f"get_tenant_config pg falló: {e}")
+    return default
+
+
+def set_tenant_config(tenant_slug: str, system_prompt: Optional[str] = None,
+                      display_language: Optional[str] = None,
+                      settings: Optional[dict] = None) -> dict:
+    """Actualiza la config del tenant. None → no tocar ese campo.
+    Retorna la config vigente tras el update."""
+    if not pg_available():
+        raise RuntimeError("Postgres no disponible — no se puede editar config de tenant")
+    sets = []
+    vals = []
+    if system_prompt is not None:
+        sets.append("system_prompt = %s"); vals.append(system_prompt)
+    if display_language is not None:
+        sets.append("display_language = %s"); vals.append(display_language)
+    if settings is not None:
+        import json as _json
+        sets.append("settings = %s::jsonb"); vals.append(_json.dumps(settings))
+    if not sets:
+        return get_tenant_config(tenant_slug)
+    vals.append(tenant_slug)
+    with pg_conn() as con:
+        with con.cursor() as cur:
+            cur.execute(f"UPDATE shared.tenants SET {', '.join(sets)} WHERE slug = %s", vals)
+    return get_tenant_config(tenant_slug)
+
+
 def link_chat_to_tenant(chat_id: int, tenant_slug: str, role: str = "member") -> None:
     """Asocia un chat_id con un tenant."""
     if pg_available():
