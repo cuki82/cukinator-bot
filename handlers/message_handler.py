@@ -217,6 +217,82 @@ async def handle_vault_callback(update, context):
         )
 
 
+async def cmd_setvault(update, context):
+    """Comando /setvault <KEY> <value> — guarda al vault con confirmación inline.
+    Reconocido como command antes que cualquier LLM toque el mensaje. Solo
+    el owner puede ejecutarlo. Uso típico: passwords sueltas sin prefijo
+    conocido (Supabase DB password, LiteLLM master key, etc)."""
+    from core.bot_core import OWNER_CHAT_ID
+    chat_id = update.effective_chat.id
+    if chat_id != OWNER_CHAT_ID:
+        await update.message.reply_text("🚫 Solo el owner puede escribir al vault.")
+        return
+
+    args = context.args or []
+    if len(args) < 2:
+        await update.message.reply_text(
+            "*Uso:* `/setvault <KEY_NAME> <value>`\n\n"
+            "Ejemplo:\n"
+            "`/setvault SUPABASE_DB_PASSWORD mi-password-nueva`\n\n"
+            "El bot pide confirmación antes de guardar al vault. "
+            "Después borrá tu mensaje de Telegram (tap largo → Delete).",
+            parse_mode="Markdown",
+        )
+        return
+
+    key_name = args[0].strip()
+    value = " ".join(args[1:]).strip()
+
+    # Validar key_name: alfanumérico + underscore + guiones, máx 64 chars
+    if not key_name or not all(c.isalnum() or c in "_-" for c in key_name) or len(key_name) > 64:
+        await update.message.reply_text(
+            "❌ *KEY_NAME inválido.* Usá solo A-Z, 0-9, `_` y `-` (máx 64 chars).",
+            parse_mode="Markdown",
+        )
+        return
+
+    if len(value) < 4 or _looks_like_placeholder(value):
+        await update.message.reply_text(
+            "❌ Valor inválido o es un placeholder sin rellenar. No guardé nada.",
+        )
+        return
+
+    # Chequear si sobrescribe una credencial existente (para el mensaje)
+    try:
+        from services.vault import get as vault_get
+        existing = vault_get(key_name)
+    except Exception:
+        existing = None
+
+    pid = _pending_create([(key_name, value, "Vault")], chat_id)
+
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Guardar", callback_data=f"vault:apply:{pid}"),
+        InlineKeyboardButton("❌ Cancelar", callback_data=f"vault:cancel:{pid}"),
+    ]])
+
+    warning = ""
+    if existing and existing != value:
+        warning = "\n⚠️ *sobrescribe* la actual (backup automático)"
+    elif existing:
+        warning = "\n ℹ️ idéntica a la actual"
+
+    await update.message.reply_text(
+        f"🔐 *Guardar al vault*\n\n"
+        f"• key: `{key_name}`\n"
+        f"• valor: `{_mask_cred(value)}`"
+        f"{warning}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"🛡️ No escribo sin que toques *Guardar*.\n"
+        f"⏱️ Expira en 5 min.\n\n"
+        f"💡 *Después de confirmar, borrá tu mensaje `/setvault ...` "
+        f"de Telegram* (tap largo → Delete for bot too).",
+        parse_mode="Markdown",
+        reply_markup=keyboard,
+    )
+
+
 async def _handle_credential_paste(update, _context, user_msg: str) -> bool:
     """Si el mensaje contiene API keys, muestra confirmación y queda pendiente
     hasta que el user apriete ✅ Guardar. Retorna True si consumió el mensaje."""

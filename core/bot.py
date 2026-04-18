@@ -22,7 +22,7 @@ from telegram.ext import (
 )
 
 # Importar handlers
-from handlers.message_handler  import handle_message, handle_voice, handle_document, handle_photo, handle_vault_callback
+from handlers.message_handler  import handle_message, handle_voice, handle_document, handle_photo, handle_vault_callback, cmd_setvault
 from handlers.callback_handler import handle_callback, cmd_menu, cmd_biblioteca
 from handlers.gmail_handler    import gmail_command
 from handlers.calendar_handler import calendar_command
@@ -68,6 +68,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("astro",     astro_command))
     app.add_handler(CommandHandler("vps",       vps_command))
     app.add_handler(CommandHandler("kb",        cmd_kb))
+    app.add_handler(CommandHandler("setvault",  cmd_setvault))
 
     # Callbacks inline
     app.add_handler(CallbackQueryHandler(handle_confirm_callback,      pattern="^confirm:"))
