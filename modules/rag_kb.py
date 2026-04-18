@@ -123,7 +123,7 @@ def _pg_ingest(schema: str, source: str, chunks: list, metadata: dict, namespace
 
 
 def _pg_search(schema: str, query: str, top_k: int, namespace):
-    """Search vectorial HNSW. Retorna lista de dicts."""
+    """Search híbrido (vector + BM25) con RRF. Usa shared.rag_search."""
     emb = _openai_embed(query)
     if emb is None:
         return []
@@ -132,33 +132,23 @@ def _pg_search(schema: str, query: str, top_k: int, namespace):
         with con.cursor() as cur:
             # Tunear ef_search para latencia/recall trade-off
             cur.execute("SET LOCAL hnsw.ef_search = 40")
-            if namespace:
-                cur.execute(
-                    f"""SELECT source, chunk_index, content, namespace,
-                              1 - (embedding <=> %s::vector) AS score,
-                              metadata
-                        FROM {schema}.kb_documents
-                        WHERE namespace = %s
-                        ORDER BY embedding <=> %s::vector
-                        LIMIT %s""",
-                    (vec, namespace, vec, top_k),
-                )
-            else:
-                cur.execute(
-                    f"""SELECT source, chunk_index, content, namespace,
-                              1 - (embedding <=> %s::vector) AS score,
-                              metadata
-                        FROM {schema}.kb_documents
-                        ORDER BY embedding <=> %s::vector
-                        LIMIT %s""",
-                    (vec, vec, top_k),
-                )
+            cur.execute(
+                "SELECT * FROM shared.rag_search(%s, %s::vector, %s, %s, %s)",
+                (schema, vec, query, namespace, top_k),
+            )
             rows = cur.fetchall()
+    # columns: id, source, chunk_index, content, namespace, vscore, bscore, rrf, metadata
     return [
         {
-            "source": r[0], "chunk_index": r[1], "content": r[2],
-            "namespace": r[3] or "general", "score": float(r[4]),
-            "metadata": r[5] if isinstance(r[5], dict) else json.loads(r[5] or "{}"),
+            "id":          r[0],
+            "source":      r[1],
+            "chunk_index": r[2],
+            "content":     r[3],
+            "namespace":   r[4] or "general",
+            "score":       float(r[7] or 0),          # score principal = RRF
+            "vector_score": float(r[5] or 0),
+            "bm25_score":  float(r[6] or 0),
+            "metadata":    r[8] if isinstance(r[8], dict) else json.loads(r[8] or "{}"),
         }
         for r in rows
     ]
@@ -282,8 +272,8 @@ def _cosine(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.dot(a, b) / (na * nb))
 
 
-def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> list[str]:
-    """Divide texto en chunks con overlap."""
+def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> list:
+    """Chunking simple por cantidad de palabras con overlap. Uso legacy."""
     words = text.split()
     chunks = []
     i = 0
@@ -291,6 +281,57 @@ def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> list[str]
         chunk = " ".join(words[i:i + chunk_size])
         chunks.append(chunk)
         i += chunk_size - overlap
+    return chunks
+
+
+def chunk_text_semantic(text: str, target_words: int = 350,
+                        min_words: int = 80, max_words: int = 550) -> list:
+    """Chunking semántico: respeta párrafos y secciones antes de partir.
+
+    Estrategia:
+      1. Partir por dobles newlines (párrafos naturales).
+      2. Agrupar párrafos consecutivos hasta llegar a target_words.
+      3. Si un párrafo solo excede max_words, usar chunk_text() sobre él.
+      4. No dejar chunks con menos de min_words salvo el último.
+
+    Para docs estructurados (PDFs de reaseguros, manuales), preserva
+    el contexto semántico mucho mejor que cortar por N palabras fijas.
+    """
+    import re as _re
+    # Normalizar saltos de línea y tratar encabezados markdown como separadores duros
+    text = _re.sub(r"\r\n", "\n", text or "")
+    # Insertamos separador extra antes de encabezados (# / ## / ### ...)
+    text = _re.sub(r"\n(#{1,6} .+)", r"\n\n\1", text)
+
+    # Partir por párrafos (dobles newlines)
+    parrs = [p.strip() for p in _re.split(r"\n{2,}", text) if p.strip()]
+    if not parrs:
+        return []
+
+    chunks = []
+    current = []
+    current_wc = 0
+    for p in parrs:
+        wc = len(p.split())
+        if wc > max_words:
+            # Flush el current antes del párrafo gigante
+            if current:
+                chunks.append("\n\n".join(current))
+                current, current_wc = [], 0
+            # Un párrafo solo demasiado grande → sub-chunk por palabras
+            for sub in chunk_text(p, chunk_size=max_words, overlap=30):
+                chunks.append(sub)
+            continue
+        if current_wc + wc > target_words and current_wc >= min_words:
+            # Flush
+            chunks.append("\n\n".join(current))
+            current = [p]
+            current_wc = wc
+        else:
+            current.append(p)
+            current_wc += wc
+    if current:
+        chunks.append("\n\n".join(current))
     return chunks
 
 
@@ -306,15 +347,17 @@ def _resolve_schema(tenant: str = None, chat_id: int = None, schema: str = None)
 
 
 def ingest(source: str, text: str, metadata: dict = None, namespace: str = "general",
-           tenant: str = None, chat_id: int = None, schema: str = None) -> int:
+           tenant: str = None, chat_id: int = None, schema: str = None,
+           semantic: bool = True) -> int:
     """
     Indexa un documento en la KB del tenant (o del schema explícito).
-    - schema: si se pasa, usa ese schema directo (ej. 'personal'). Útil para
-      data cross-tenant como perfiles astrológicos o memoria conversacional.
-    - Si hay Postgres (pgvector): embedding OpenAI + insert en <schema>.kb_documents.
+    - schema: si se pasa, usa ese schema directo (ej. 'personal').
+    - semantic=True (default): usa chunk_text_semantic que respeta párrafos
+      y secciones. False → chunk_text legacy por N palabras.
+    - Si hay Postgres (pgvector): embedding OpenAI + insert con hybrid search.
     - Si no: TF-IDF + SQLite local (fallback).
     """
-    chunks = chunk_text(text)
+    chunks = chunk_text_semantic(text) if semantic else chunk_text(text)
     if not chunks:
         return 0
 
@@ -404,12 +447,14 @@ MIN_SCORE = 0.15
 
 def build_context(query: str, top_k: int = 5, namespace: str = None,
                   min_score: float = MIN_SCORE, tenant: str = None,
-                  chat_id: int = None, schema: str = None) -> str:
+                  chat_id: int = None, schema: str = None,
+                  with_citations: bool = True) -> str:
     """
     Arma el contexto RAG para incluir en el prompt de Claude.
-    Solo incluye chunks con score >= min_score. Retorna "" si no hay nada relevante.
-    - schema explícito (ej. 'personal') override el tenant (para data cross-tenant).
-    - Sino, usa el schema del tenant resuelto del chat_id.
+    Cada chunk se marca con [C1], [C2], ... para que el LLM pueda citar
+    las fuentes explícitamente en su respuesta.
+
+    Solo incluye chunks con score >= min_score.
     """
     results = search(query, top_k=top_k, namespace=namespace, tenant=tenant,
                      chat_id=chat_id, schema=schema)
@@ -418,12 +463,26 @@ def build_context(query: str, top_k: int = 5, namespace: str = None,
         return ""
     header = "Contexto relevante de la knowledge base"
     if namespace:
-        header += f" ({namespace})"
+        header += f" (namespace {namespace})"
     parts = [header + ":\n"]
     for i, r in enumerate(results, 1):
-        score_pct = int(r["score"] * 100)
-        ns_tag = f" · {r['namespace']}" if r.get("namespace") and r["namespace"] != "general" else ""
-        parts.append(f"[{i}] {r['source']}{ns_tag} (relevancia {score_pct}%):\n{r['content']}\n")
+        src = r.get("source", "?")
+        ns_tag = r.get("namespace", "general")
+        chunk_idx = r.get("chunk_index", 0)
+        score = r.get("score", 0)
+        score_pct = int(score * 100) if score < 1 else int(score * 10)
+        # ID amigable para que el LLM cite: [C1], [C2], ...
+        tag = f"[C{i}]"
+        parts.append(
+            f"{tag} fuente=`{src}` · ns=`{ns_tag}` · chunk={chunk_idx} · rel={score_pct}\n"
+            f"{r['content']}\n"
+        )
+    if with_citations:
+        parts.append(
+            "\n[INSTRUCCIÓN CITAS]: al usar información de este contexto, citá "
+            "la fuente usando la marca [C1], [C2], etc. que aparece arriba. "
+            "Ej: 'Según el treaty XYZ [C2], la cedente…'"
+        )
     return "\n".join(parts)
 
 
