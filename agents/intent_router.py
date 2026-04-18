@@ -66,10 +66,11 @@ _PATTERNS = {
         r"parar? (?:el )?(?:servicio|worker|bot)",
     ],
     "research": [
-        r"busca[rn]?", r"investiga[rn]?", r"encontr[aá]", r"qu[eé] dice", r"qu[eé] es",
-        r"c[oó]mo funciona", r"explic[aá]", r"compara[rn]?", r"an[aá]liz[aá]",
-        r"resumen", r"noticias", r"último[s]?", r"informaci[oó]n sobre",
-        r"documentaci[oó]n", r"normativa", r"regulaci[oó]n",
+        r"\bbusc[aáoó]\w*", r"\binvestig[aáoó]\w*", r"\bencontr[aá]\w*",
+        r"qu[eé] dice", r"qu[eé] es", r"c[oó]mo funciona",
+        r"\bexplic[aá]\w*", r"\bcompar[aáoó]\w*", r"\ban[aá]liz[aá]\w*",
+        r"\bresumen\b", r"\bnoticias\b", r"\búltim[oa]s?\b", r"\binformaci[oó]n sobre\b",
+        r"\bdocumentaci[oó]n\b", r"\bnormativa\b", r"\bregulaci[oó]n\b",
     ],
     "reinsurance": [
         r"reaseguro", r"reinsur", r"p[oó]liza", r"wording", r"cl[aá]usula",
