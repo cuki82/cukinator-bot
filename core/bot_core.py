@@ -871,6 +871,28 @@ TOOLS = [
         }
     },
     {
+        "name": "calcular_transitos",
+        "description": (
+            "Calcula los tránsitos astrológicos actuales (o en una fecha específica) sobre "
+            "la carta natal de una persona. Requiere que la persona tenga un perfil guardado "
+            "(astro_guardar_perfil o uno de los que listan). Retorna los aspectos exactos "
+            "entre planetas en movimiento y planetas natales, priorizados por peso "
+            "(Saturno/Urano/Neptuno/Plutón primero, más lentos = más significativos). "
+            "Usá cuando el user pida 'qué tránsitos tengo', 'qué está activo ahora', "
+            "'tránsitos para tal fecha', etc."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "nombre": {"type": "string", "description": "Nombre de la persona con carta natal guardada"},
+                "fecha": {"type": "string", "description": "DD/MM/AAAA — opcional, default hoy (UTC)"},
+                "hora":  {"type": "string", "description": "HH:MM UTC — opcional, default mediodía"},
+                "orb_multiplier": {"type": "number", "description": "1.0 default; 2.0 para ver aspectos más amplios, 0.5 para solo exactos"}
+            },
+            "required": ["nombre"]
+        }
+    },
+    {
         "name": "astro_listar_perfiles",
         "description": "Lista todos los perfiles astrológicos guardados.",
         "input_schema": {
@@ -1377,6 +1399,7 @@ ASTROLOGÍA:
 - Si pide ver la carta de alguien, usás astro_ver_perfil.
 - Si pide listar perfiles guardados, usás astro_listar_perfiles.
 - Si pide borrar un perfil, usás astro_eliminar_perfil.
+- Si pide tránsitos, qué le está pasando astrológicamente, qué planetas están activos, o similar, usás calcular_transitos (requiere que haya un perfil guardado de la persona — si el usuario pregunta por sí mismo, asumí que quiere "Cuki" o el nombre que tenga guardado como propio).
 - Cuando el usuario pida una ficha tecnica astrologica completa, usa calcular_carta_natal con ficha_tecnica=true. Esto devuelve el analisis tecnico completo con secciones 0-8. NO resumir, NO interpretar, mostrar el output completo tal como viene.
 - Si el usuario pide lista de cartas, menu, ver cartas o /cartas, llama a la tool astro_listar_perfiles y presenta los perfiles de forma conversacional. No uses botones desde Claude, esos se manejan por separado.
 
@@ -1851,6 +1874,25 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
                         except Exception as e:
                             result = f"Error recuperando perfil: {e}"
                             log.error(f"Astro ver error: {e}")
+
+                    elif block.name == "calcular_transitos":
+                        try:
+                            from modules.swiss_engine import calc_transitos, formatear_transitos
+                            nombre = block.input["nombre"]
+                            datos = astro_recuperar(chat_id, nombre)
+                            if not datos:
+                                result = f"No tengo carta guardada de {nombre}. Guardala primero con astro_guardar_perfil."
+                            else:
+                                carta = calcular_carta(datos["fecha"], datos["hora"], datos["lugar"])
+                                fecha_t = block.input.get("fecha")
+                                hora_t  = block.input.get("hora")
+                                orb     = block.input.get("orb_multiplier", 1.0)
+                                transitos = calc_transitos(carta, fecha=fecha_t, hora=hora_t, orb_multiplier=orb)
+                                header = f"Tránsitos sobre la carta natal de {nombre.title()} ({datos['fecha']} {datos['hora']} — {datos['lugar']}):"
+                                result = header + "\n\n" + formatear_transitos(transitos, top_n=15)
+                        except Exception as e:
+                            result = f"Error calculando tránsitos: {e}"
+                            log.error(f"Astro transitos error: {e}")
 
                     elif block.name == "astro_listar_perfiles":
                         try:
