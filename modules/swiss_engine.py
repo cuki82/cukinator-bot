@@ -933,7 +933,10 @@ def calc_retorno_solar(carta_natal: dict, anio: int = None,
     # Búsqueda: desde inicio del año buscamos el próximo cruce del Sol por la lon natal
     jd_start = swe.julday(anio, 1, 1, 0.0)
     try:
-        flag, tret = swe.solcross_ut(sol_natal_lon, jd_start)
+        _r = swe.solcross_ut(sol_natal_lon, jd_start)
+        # La versión actual de pyswisseph retorna solo el JD (float);
+        # versiones anteriores retornaban tuple (flag, jd). Manejamos ambos.
+        tret = _r if isinstance(_r, (int, float)) else _r[1]
     except AttributeError:
         # fallback: iterar manualmente si la versión de pyswisseph es vieja
         tret = _find_return_iterative(sol_natal_lon, jd_start, swe.SUN)
@@ -995,7 +998,8 @@ def calc_retorno_lunar(carta_natal: dict, fecha_ref: str = None,
         jd_start = _julian_ahora_ut()
 
     try:
-        flag, tret = swe.mooncross_ut(luna_natal_lon, jd_start)
+        _r = swe.mooncross_ut(luna_natal_lon, jd_start)
+        tret = _r if isinstance(_r, (int, float)) else _r[1]
     except AttributeError:
         tret = _find_return_iterative(luna_natal_lon, jd_start, swe.MOON)
 
