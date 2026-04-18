@@ -320,51 +320,88 @@ def _codex_client():
     return openai.OpenAI(api_key=key)
 
 
-CODEX_MODEL = os.environ.get("CODEX_MODEL", "gpt-4o-mini")
-# Nota: gpt-5-codex requiere el endpoint v1/responses (nuevo), no chat/completions.
-# Usamos gpt-4o-mini por default: barato, rápido, compatible con chat/completions,
-# suficiente para planificar y resumir tareas de código.
+CODEX_MODEL = os.environ.get("CODEX_MODEL", "gpt-5-codex")
+# gpt-5-codex requiere el endpoint /v1/responses (API nueva de OpenAI). No
+# funciona con /v1/chat/completions (da 404). Todo el flujo Codex del worker
+# usa _openai_responses() que llama a /v1/responses via HTTP directo — así
+# nos independizamos de la versión del cliente openai-python.
+
+
+def _openai_responses(instructions: str, user_input: str,
+                     model: Optional[str] = None, max_tokens: int = 800) -> str:
+    """Llama al endpoint /v1/responses de OpenAI y devuelve el texto generado.
+    Retorna "" si falla (caller hace fallback al prompt raw)."""
+    key = os.environ.get("OPENAI_API_KEY") or os.environ.get("OPENAI_KEY", "")
+    if not key:
+        log.warning("OPENAI_API_KEY no configurada — Codex desactivado")
+        return ""
+    try:
+        r = _req.post(
+            "https://api.openai.com/v1/responses",
+            headers={
+                "Authorization": f"Bearer {key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": model or CODEX_MODEL,
+                "instructions": instructions,
+                "input": user_input,
+                "max_output_tokens": max_tokens,
+            },
+            timeout=60,
+        )
+        if r.status_code != 200:
+            log.error(f"OpenAI /responses {r.status_code}: {r.text[:300]}")
+            return ""
+        data = r.json()
+        # Shortcut si la SDK lo provee
+        if "output_text" in data and isinstance(data["output_text"], str):
+            return data["output_text"].strip()
+        # Parseo manual del output structured
+        for item in data.get("output", []) or []:
+            if item.get("type") == "message":
+                for c in item.get("content", []) or []:
+                    if c.get("type") in ("output_text", "text"):
+                        return (c.get("text") or "").strip()
+        return ""
+    except Exception as e:
+        log.error(f"OpenAI /responses error: {e}")
+        return ""
 
 
 def codex_plan(user_text: str) -> str:
-    """Codex transforma el mensaje del usuario en un prompt detallado para Claude."""
-    client = _codex_client()
-    if not client:
+    """gpt-5-codex transforma el mensaje del user en un prompt técnico para Claude Code CLI."""
+    system = (
+        "Sos un prompt engineer experto en tareas DevOps/coding sobre un bot Python. "
+        "El usuario manda una descripción informal. Convertila en un prompt técnico detallado "
+        "para un agente ejecutor (Claude Code CLI) que tiene tools reales de filesystem, "
+        "bash, git, grep. El prompt debe incluir: objetivo claro, archivos relevantes a "
+        "leer antes de editar, pasos concretos, criterio de éxito. Respondeme SOLO con el "
+        "prompt final en español rioplatense, sin preámbulos."
+    )
+    plan = _openai_responses(system, user_text, max_tokens=800)
+    if not plan:
+        log.warning("codex_plan fallback a prompt raw (sin expandir)")
         return user_text
-    try:
-        system = "Sos un prompt engineer experto en tareas DevOps/coding sobre un bot Python. El usuario manda una descripcion informal. Convertila en un prompt tecnico detallado para un agente ejecutor (Claude) que tiene estos tools: bash_exec, read_file, write_file, git_status, git_commit_push, run_tests. El prompt debe incluir: objetivo claro, archivos relevantes a leer, pasos concretos, criterio de exito. Respondeme SOLO con el prompt final en espanol rioplatense, sin preambulos."
-        r = client.chat.completions.create(
-            model=CODEX_MODEL, max_tokens=800,
-            messages=[{"role": "system", "content": system}, {"role": "user", "content": user_text}]
-        )
-        plan = r.choices[0].message.content.strip()
-        log.info(f"[codex_plan] {len(plan)} chars")
-        return plan
-    except Exception as e:
-        log.error(f"codex_plan error: {e}")
-        return user_text
+    log.info(f"[codex_plan] {len(plan)} chars")
+    return plan
 
 
 def codex_summarize(user_text: str, raw_summary: str, modified_files: list, git_info: dict) -> str:
-    """Codex formatea el resultado de Claude para el usuario."""
-    client = _codex_client()
-    if not client:
-        return raw_summary
-    try:
-        context = f"Pedido: {user_text}" + chr(10)*2 + f"Resultado tecnico: {raw_summary}" + chr(10)
-        if modified_files:
-            context += f"Archivos modificados: {modified_files}" + chr(10)
-        if git_info.get("commit"):
-            context += f"Git: {git_info['commit']}" + chr(10)
-        system = "Sos un formateador de respuestas tecnicas para Telegram (rioplatense). Recibis el pedido original + resultado tecnico de un agente. Genera una respuesta clara, concisa, con markdown basico (bullets, bold). Maximo 1500 caracteres. Sin preambulos. Arranca directo con lo relevante."
-        r = client.chat.completions.create(
-            model=CODEX_MODEL, max_tokens=600,
-            messages=[{"role": "system", "content": system}, {"role": "user", "content": context}]
-        )
-        return r.choices[0].message.content.strip()
-    except Exception as e:
-        log.error(f"codex_summarize error: {e}")
-        return raw_summary
+    """gpt-5-codex formatea el resultado de Claude Code para mandarlo a Telegram."""
+    context = f"Pedido: {user_text}\n\nResultado técnico: {raw_summary}\n"
+    if modified_files:
+        context += f"Archivos modificados: {modified_files}\n"
+    if git_info.get("commit"):
+        context += f"Git: {git_info['commit']}\n"
+    system = (
+        "Sos un formateador de respuestas técnicas para Telegram (rioplatense). Recibís "
+        "el pedido original + resultado técnico de un agente. Generá una respuesta clara, "
+        "concisa, con markdown básico (bullets, bold). Máximo 1500 caracteres. Sin preámbulos. "
+        "Arrancá directo con lo relevante."
+    )
+    out = _openai_responses(system, context, max_tokens=600)
+    return out or raw_summary
 
 
 def run_agent(task):

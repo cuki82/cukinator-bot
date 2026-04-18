@@ -72,11 +72,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 errors_part = f"\n⚠️ {errors_n} error(es)" if errors_n else ""
                 reply_text += (
                     f"\n\n━━━━━━━━━━━━━━━━━━━\n"
-                    f"📥 De: {name} (chat {chat_id})\n"
-                    f"📤 Delegó al *Agent Worker* (VPS :3335)\n"
-                    f"   🧠 Plan → *Codex* (gpt-4o-mini)\n"
-                    f"   ⚡ Ejecuta → *Claude Code CLI*\n"
-                    f"   📝 Summary → *Codex* (gpt-4o-mini)\n"
+                    f"📥 *De:* {name} (chat {chat_id})\n"
+                    f"🎯 *Intent router* → `coding` (keyword-based, sin LLM)\n"
+                    f"📤 *Bot handler* → *Agent Worker* (VPS :3335)\n"
+                    f"   🧠 Plan     → *Codex* `gpt-5-codex` via /v1/responses\n"
+                    f"   ⚡ Ejecuta  → *Claude Code CLI* (Opus via Anthropic API)\n"
+                    f"   📝 Summary  → *Codex* `gpt-5-codex`\n"
+                    f"↪️ *Agent Worker* → Bot handler → *{name}*\n"
                     f"⏱️ Latencia total: {elapsed}s · {status_emoji} status: {status}"
                     f"{files_part}{errors_part}"
                 )
