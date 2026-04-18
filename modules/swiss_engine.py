@@ -10,6 +10,7 @@ Principios:
 - Asignación de casa por cúspides reales, nunca por división de 30°
 """
 
+import os
 import swisseph as swe
 import datetime
 import pytz
