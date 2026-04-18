@@ -18,6 +18,38 @@ _PATTERNS = {
         r"refactoriz[aá]", r"reescrib[ií]", r"agregá? un tool", r"agregá? un handler",
         r"cambi[aá] el system prompt", r"modific[aá] bot_core", r"nueva integraci[oó]n al bot",
         r"deploy", r"dockerfile", r"requirements\.txt", r"github",
+        # Code review / investigación / propuesta de cambios — estas tareas van
+        # al worker porque típicamente terminan con "proponé", "hacé el cambio"
+        # o "pusheá". Si caen en Claude directo, Haiku puede LEER el código con
+        # las tools vps_* pero NO pushear (git_commit_push solo existe en el
+        # worker) — y se queda preguntando "¿hacemos el push?" sin poder ejecutar.
+        r"\brevis[aá]\s+(?:el\s+|la\s+)?(?:c[oó]digo|handler|funci[oó]n|archivo|bot|m[oó]dulo|l[oó]gica)",
+        r"\banaliz[aá]\s+(?:el\s+|la\s+)?(?:c[oó]digo|handler|funci[oó]n|archivo|flujo|l[oó]gica)",
+        r"\binspeccion[aá]\w*\s+(?:el\s+|la\s+|los\s+|las\s+)?(?:c[oó]digo|handler|funci[oó]n|archivo|bot|repo)",
+        r"\binvestig[aá]\s+(?:el\s+|la\s+|c[oó]mo\s+)?(?:c[oó]digo|funci[oó]n|handler|funciona|est[aá]\s+hech[oa]|anda)",
+        r"\bpropone[mr]?e?\s+(?:un\s+|una\s+)?(?:cambio|mejora|modificaci[oó]n|fix|implementaci[oó]n|c[oó]mo)",
+        r"\bsuger[ií]\w*\s+(?:un\s+|una\s+)?(?:cambio|modificaci[oó]n|mejora|c[oó]mo)",
+        r"\bfixe[aá]?r?\s+(?:el\s+|la\s+|un\s+|los\s+|las\s+)?(?:bug|error|c[oó]digo|handler|funci[oó]n|archivo|bot)",
+        r"\barreglar?\s+(?:el\s+|la\s+)?(?:bug|c[oó]digo|funci[oó]n|handler|archivo|bot|error|m[oó]dulo)",
+        r"\bmejorar?\s+(?:el\s+|la\s+)?(?:c[oó]digo|funci[oó]n|bot|handler|performance|flujo)",
+        r"\bc[oó]mo est[aá]\s+(?:implementad[ao]|el\s+c[oó]digo|hech[oa]|el\s+handler|la\s+funci[oó]n)",
+        r"\bimplement[aá]\s+(?:el\s+|un[ao]?\s+)?(?:feature|funci[oó]n|handler|m[oó]dulo|tool|cambio|fix)",
+        r"\bmir[aá]\s+(?:el\s+|la\s+)?(?:c[oó]digo|handler|funci[oó]n|archivo|bot)",
+        # Fallback amplio: si el mensaje menciona el dominio técnico del bot
+        # + cualquier verbo de acción/investigación → coding. Mejor falso positivo
+        # (va al worker Codex+ClaudeCode, que igual puede solo responder si no
+        # hay nada que cambiar) que falso negativo (Haiku que no puede pushear).
+        r"\b(?:revis|analiz|investig|propon|suger|fixe|arregl|mejor|mir|inspeccion|edit|cambi|modific|escrib|reescrib|implement|agreg|refactor|fij|corregi|ajust)\w*\b.*\b(?:c[oó]digo|handler|funci[oó]n|archivo|bot|worker|router|m[oó]dulo|endpoint|prompt|config|schema|logic|voice|audio|rag|kb|sistema|arquitectura|pipeline|feature|trace|token|intent|servicio)\b",
+        r"\bpor qu[eé]\s+.*(?:no\s+)?(?:funciona|anda|falla|devuelve|retorna|crashea|rompe)",
+        r"\bhacemos?\s+(?:el\s+)?push",
+        r"\b(?:qu[eé]\s+)?(?:est[aá]s?|estuvo|estaba)\s+(?:pasando|fallando|rompiendo)\b",
+        # DevOps fallback — cualquier verbo de estado/acción sobre un servicio/infra
+        # va al worker. El user lo quiere así: "no es solo código, también cualquier
+        # decisión que tenga que ver con DevOps".
+        r"\b(?:pas|anda|funcion|fall|crash|crashe|rompe|devuelv|retorn|responde|est[aá]|qued[oó])\w*\b.*\b(?:bot|worker|mcp|servicio|service|vps|railway|deploy|systemd|docker|container|endpoint|api)\b",
+        r"\b(?:actualiz|updat|upgradear?|downgradear?|bumpear?|moverl[oa]?|migrar?)\w*\b",
+        r"\b(?:qu[eé]\s+pasa|qu[eé]\s+tiene|qu[eé]\s+est[aá]\s+pasando)\s+(?:con\s+)?(?:el|la|los|las)?\s*(?:bot|worker|mcp|servicio|vps|deploy|sistema|arquitectura|endpoint|railway|docker)",
+        r"\bno\s+(?:anda|funciona|responde|conecta|levanta|arranca|llega|procesa|transcribe|clasifica)",
         # DevOps / VPS / servidor
         r"entra[rn]? al servidor", r"accede[rn]? al vps", r"conect[aá]te al",
         r"fijate en el vps", r"ver[ií]? en el servidor", r"chequea[rn]? el vps",

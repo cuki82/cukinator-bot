@@ -1502,20 +1502,50 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
     vps_tools_used = 0
     _tools_used: list = []  # orden de invocación, para trace footer
     _rag_injected = False
+    _tokens_in = 0
+    _tokens_out = 0
+    _cache_read = 0
+    _started_at = time.time()
 
     _intent = _classify(user_text)
     _model  = _select_model(user_text, _intent)
     log.info(f"[{chat_id}] model={_model} intent={_intent}")
 
+    _MODEL_FRIENDLY = {
+        "claude-haiku-4-5":  "Haiku 4.5",
+        "claude-sonnet-4-6": "Sonnet 4.6",
+        "claude-opus-4-5":   "Opus 4.5",
+        "claude-opus-4-6":   "Opus 4.6",
+        "claude-opus-4-7":   "Opus 4.7",
+    }
+    _INTENT_FRIENDLY = {
+        "conversational": "conversacional",
+        "coding":         "coding",
+        "research":       "búsqueda web",
+        "reinsurance":    "reaseguros",
+        "astrology":      "astrología",
+        "personal":       "personal",
+    }
+
     def _trace_footer() -> str:
-        """Footer con model/intent/tools cuando BOT_TRACE=true. Vacío si no."""
+        """Footer humano con from/to, modelo, latencia y tokens si BOT_TRACE=true."""
         if os.environ.get("BOT_TRACE", "").lower() not in ("true", "1"):
             return ""
-        tools_str = ", ".join(_tools_used) if _tools_used else "(ninguno)"
-        rag_str = "sí" if _rag_injected else "no"
+        elapsed = time.time() - _started_at
+        model_nice = _MODEL_FRIENDLY.get(_model, _model)
+        intent_nice = _INTENT_FRIENDLY.get(_intent, _intent)
+        total_tokens = _tokens_in + _tokens_out
+        tools_part = f"\n🔧 Tools: {', '.join(_tools_used)}" if _tools_used else ""
+        rag_part = "\n📚 RAG inyectado del KB" if _rag_injected else ""
+        cache_part = f" (cache {_cache_read})" if _cache_read else ""
+        sender = f"{user_name or 'Usuario'} (chat {chat_id})"
         return (
-            f"\n\n_\\[trace\\] model=`{_model}` · intent=`{_intent}` · "
-            f"iters={iteration} · tools=[{tools_str}] · rag={rag_str}_"
+            f"\n\n━━━━━━━━━━━━━━━━━━━\n"
+            f"📥 De: {sender}\n"
+            f"📤 Resolvió: Claude *{model_nice}* ({intent_nice})\n"
+            f"⏱️ Latencia: {elapsed:.1f}s\n"
+            f"🔢 Tokens: {total_tokens} ({_tokens_in} in / {_tokens_out} out{cache_part})"
+            f"{tools_part}{rag_part}"
         )
 
     # RAG: inyectar contexto de KB para cualquier intent no-conversational.
@@ -1550,6 +1580,15 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
             tools=tools_activos,
             messages=messages
         )
+        # Acumular usage para el trace footer
+        try:
+            _u = getattr(response, "usage", None)
+            if _u:
+                _tokens_in  += getattr(_u, "input_tokens", 0) or 0
+                _tokens_out += getattr(_u, "output_tokens", 0) or 0
+                _cache_read += getattr(_u, "cache_read_input_tokens", 0) or 0
+        except Exception:
+            pass
         log.info(f"[{chat_id}] Claude iter {iteration} stop_reason={response.stop_reason}")
 
         if response.stop_reason == "tool_use":
@@ -2318,6 +2357,13 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
                 system=get_system_prompt(chat_id=chat_id),
                 messages=messages
             )
+            try:
+                _u = getattr(force_resp, "usage", None)
+                if _u:
+                    _tokens_in  += getattr(_u, "input_tokens", 0) or 0
+                    _tokens_out += getattr(_u, "output_tokens", 0) or 0
+            except Exception:
+                pass
             for block in force_resp.content:
                 if hasattr(block, "text") and block.text.strip():
                     return block.text.strip() + _trace_footer(), pdf_path, extra_files

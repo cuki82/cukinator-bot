@@ -63,13 +63,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             result = await send_coding_task(user_msg, chat_id)
             reply_text = format_worker_result(result)
             if os.environ.get("BOT_TRACE", "").lower() in ("true", "1"):
-                # El worker devuelve duration_s (float); fallback a otros nombres por compat
                 elapsed = result.get("duration_s") or result.get("elapsed_seconds") or result.get("duration") or "?"
                 status  = result.get("status", "?")
-                model_hint = result.get("model") or "codex+claude-code-cli"
+                modified = result.get("modified_files") or []
+                errors_n = len(result.get("errors") or [])
+                status_emoji = {"ok": "✅", "partial": "⚠️", "error": "❌", "busy": "🚦", "timeout": "⏰"}.get(status, "❓")
+                files_part = f"\n📝 Archivos tocados: {len(modified)}" if modified else ""
+                errors_part = f"\n⚠️ {errors_n} error(es)" if errors_n else ""
                 reply_text += (
-                    f"\n\n_\\[trace\\] via=`agent_worker@VPS:3335` · intent=`coding` · "
-                    f"model=`{model_hint}` · status=`{status}` · elapsed=`{elapsed}s`_"
+                    f"\n\n━━━━━━━━━━━━━━━━━━━\n"
+                    f"📥 De: {name} (chat {chat_id})\n"
+                    f"📤 Delegó al *Agent Worker* (VPS :3335)\n"
+                    f"   🧠 Plan → *Codex* (gpt-4o-mini)\n"
+                    f"   ⚡ Ejecuta → *Claude Code CLI*\n"
+                    f"   📝 Summary → *Codex* (gpt-4o-mini)\n"
+                    f"⏱️ Latencia total: {elapsed}s · {status_emoji} status: {status}"
+                    f"{files_part}{errors_part}"
                 )
             save_message_full(chat_id, "user", user_msg, db_path=DB_PATH)
             save_message_full(chat_id, "assistant", reply_text, db_path=DB_PATH)
