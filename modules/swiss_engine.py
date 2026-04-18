@@ -113,17 +113,30 @@ def to_julian_ut(fecha: str, hora: str, lugar: str) -> dict:
     }
 
 
+# Path a ephemerides descargadas. Si no existe, MOSH funciona para planetas
+# principales pero no para asteroides (Quirón). Con este path + FLG_SWIEPH
+# se calculan planetas + Nodo + Quirón con precisión completa.
+_EPHE_PATH = os.environ.get("SWISSEPH_PATH", "/home/cukibot/.swisseph")
+if os.path.isdir(_EPHE_PATH):
+    try:
+        swe.set_ephe_path(_EPHE_PATH)
+    except Exception:
+        pass
+
+
 # ── 2. Cálculo de planetas ──────────────────────────────────────────────────────
 def calc_planets(jd_ut: float, flags: int = MOSH) -> dict:
     """
-    Calcula posiciones planetarias.
+    Calcula posiciones planetarias. Quirón usa FLG_SWIEPH (requiere seas_18.se1).
 
     Returns dict: nombre -> {lon, lat, dist, speed, retrogrado, signo}
     """
     resultado = {}
     for pid, nombre in PLANETAS:
         try:
-            pos, ret = swe.calc_ut(jd_ut, pid, flags)
+            # Quirón (y futuros asteroides) requieren ephemerides specific
+            use_flags = swe.FLG_SWIEPH if nombre in ("Quiron",) else flags
+            pos, ret = swe.calc_ut(jd_ut, pid, use_flags)
             lon = normalize_lon(pos[0])
             resultado[nombre] = {
                 "lon":        lon,
