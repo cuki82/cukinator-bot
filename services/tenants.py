@@ -51,14 +51,12 @@ CREATE INDEX IF NOT EXISTS idx_tenant_chat ON tenant_chat_ids(chat_id);
 def _sqlite_conn():
     con = sqlite3.connect(DB_PATH)
     con.executescript(_SQLITE_SCHEMA)
-    # Seed default tenant si está vacío
+    # Seed del tenant base (reamerica). Tenants adicionales se agregan con
+    # add_tenant(slug, display_name, owner_email) cuando lleguen — no hay
+    # placeholders inventados.
     con.execute(
         "INSERT OR IGNORE INTO tenants(slug, display_name, schema_name, owner_email) VALUES (?, ?, ?, ?)",
         (DEFAULT_TENANT, "Reamerica Risk Advisors", DEFAULT_TENANT, "proyectoastroboy@gmail.com"),
-    )
-    con.execute(
-        "INSERT OR IGNORE INTO tenants(slug, display_name, schema_name, owner_email) VALUES (?, ?, ?, ?)",
-        ("diaz", "Díaz", "diaz", None),
     )
     con.execute(
         "INSERT OR IGNORE INTO tenant_chat_ids(tenant_slug, chat_id, role) VALUES (?, ?, ?)",

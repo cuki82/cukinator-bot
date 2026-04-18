@@ -158,14 +158,17 @@ END;
 $$;
 
 
--- ── Bootstrap de los primeros dos tenants ────────────────────────────────
+-- ── Bootstrap: solo el tenant base (reamerica) ───────────────────────────
+-- Los tenants adicionales se agregan con:
+--   INSERT INTO shared.tenants (slug, display_name, schema_name, owner_email)
+--     VALUES ('slug', 'Display', 'slug', 'owner@mail.com');
+--   SELECT shared.create_tenant_schema('slug');
+-- O desde el bot via services/tenants.py → add_tenant(slug, name, email).
 INSERT INTO shared.tenants (slug, display_name, schema_name, owner_email) VALUES
-    ('reamerica', 'Reamerica Risk Advisors', 'reamerica', 'proyectoastroboy@gmail.com'),
-    ('diaz',      'Díaz',                    'diaz',      NULL)
+    ('reamerica', 'Reamerica Risk Advisors', 'reamerica', 'proyectoastroboy@gmail.com')
 ON CONFLICT (slug) DO NOTHING;
 
 SELECT shared.create_tenant_schema('reamerica');
-SELECT shared.create_tenant_schema('diaz');
 
 -- Mapear el chat_id del owner al tenant reamerica
 INSERT INTO shared.tenant_chat_ids (tenant_slug, chat_id, role) VALUES
