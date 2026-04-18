@@ -106,7 +106,7 @@ def generar_pdf(carta: dict, ficha_tecnica: bool = False) -> str:
 
     if ficha_tecnica:
         # PDF con ficha técnica completa (8 secciones)
-        import swiss_engine as _e
+        from modules import swiss_engine as _e
         for nombre_p, pd in carta.get("planetas", {}).items():
             if "error" not in pd:
                 pd["dignidad"]        = _e.calc_dignidad(nombre_p, pd.get("signo", ""))
@@ -3679,7 +3679,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         def run():
             try:
-                import swiss_engine as e
+                from modules import swiss_engine as e
                 carta = e.calc_carta_completa(datos["fecha"], datos["hora"], datos["lugar"])
                 if ficha_tecnica:
                     for n, d in carta["planetas"].items():
@@ -3736,7 +3736,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         nombre = data.split(":", 2)[2]
         await query.edit_message_text(f"⏳ Calculando tránsitos sobre {target} de {nombre.title()}...")
         try:
-            import swiss_engine as e
+            from modules import swiss_engine as e
             from modules.swiss_engine import (
                 calc_transitos, formatear_transitos,
                 calc_retorno_solar, calc_retorno_lunar,
@@ -3768,7 +3768,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         nombre = data.split(":", 2)[2]
         await query.edit_message_text(f"⏳ Analizando triple capa de {nombre.title()} (natal → solar → lunar)...")
         try:
-            import swiss_engine as e
+            from modules import swiss_engine as e
             from modules.swiss_engine import calc_triple_capa, formatear_triple_capa
             datos = astro_recuperar(chat_id, nombre)
             if not datos:
