@@ -155,8 +155,11 @@ def classify_complexity(text: str) -> str:
 
 # Model mapping
 MODEL_MAP = {
+    # Conversacional: Haiku para frases cortas (qué hora, hola, ok),
+    # Sonnet para mensajes medios/largos (prefiere calidad sobre costo
+    # cuando el user está realmente conversando).
     ("simple",  "conversational"): "claude-haiku-4-5",
-    ("medium",  "conversational"): "claude-haiku-4-5",
+    ("medium",  "conversational"): "claude-sonnet-4-6",
     ("complex", "conversational"): "claude-sonnet-4-6",
     ("simple",  "research"):       "claude-haiku-4-5",
     ("medium",  "research"):       "claude-sonnet-4-6",
@@ -166,7 +169,7 @@ MODEL_MAP = {
     ("complex", "reinsurance"):    "claude-opus-4-5",
     ("simple",  "astrology"):      "claude-sonnet-4-6",
     ("medium",  "astrology"):      "claude-sonnet-4-6",
-    ("complex", "astrology"):      "claude-sonnet-4-6",
+    ("complex", "astrology"):      "claude-opus-4-5",  # interpretaciones profundas merecen Opus
     ("simple",  "personal"):       "claude-haiku-4-5",
     ("medium",  "personal"):       "claude-haiku-4-5",
     ("complex", "personal"):       "claude-haiku-4-5",

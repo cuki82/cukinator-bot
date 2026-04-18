@@ -294,13 +294,25 @@ def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> list[str]
     return chunks
 
 
+def _resolve_schema(tenant: str = None, chat_id: int = None, schema: str = None) -> str:
+    """Si se pasa schema directo, lo usa (ej. 'personal'). Sino resuelve del tenant."""
+    if schema:
+        # Validación anti-SQL-injection
+        if not all(c.isalnum() or c == "_" for c in schema):
+            raise ValueError(f"schema inválido: {schema!r}")
+        return schema
+    slug = tenant or (resolve_tenant(chat_id) if chat_id else DEFAULT_TENANT)
+    return tenant_schema(slug)
+
+
 def ingest(source: str, text: str, metadata: dict = None, namespace: str = "general",
-           tenant: str = None, chat_id: int = None) -> int:
+           tenant: str = None, chat_id: int = None, schema: str = None) -> int:
     """
-    Indexa un documento en la KB del tenant.
-    - Si hay Postgres (pgvector): embedding OpenAI + insert en <tenant>.kb_documents.
+    Indexa un documento en la KB del tenant (o del schema explícito).
+    - schema: si se pasa, usa ese schema directo (ej. 'personal'). Útil para
+      data cross-tenant como perfiles astrológicos o memoria conversacional.
+    - Si hay Postgres (pgvector): embedding OpenAI + insert en <schema>.kb_documents.
     - Si no: TF-IDF + SQLite local (fallback).
-    - tenant: slug del tenant; si no se pasa, se resuelve de chat_id; sino default.
     """
     chunks = chunk_text(text)
     if not chunks:
@@ -308,12 +320,11 @@ def ingest(source: str, text: str, metadata: dict = None, namespace: str = "gene
 
     # Backend Postgres + pgvector
     if pg_available():
-        slug = tenant or (resolve_tenant(chat_id) if chat_id else DEFAULT_TENANT)
-        schema = tenant_schema(slug)
+        resolved = _resolve_schema(tenant=tenant, chat_id=chat_id, schema=schema)
         try:
-            return _pg_ingest(schema, source, chunks, metadata or {}, namespace)
+            return _pg_ingest(resolved, source, chunks, metadata or {}, namespace)
         except Exception as e:
-            log.error(f"pg ingest falló ({slug}.{source}): {e} — fallback a SQLite")
+            log.error(f"pg ingest falló ({resolved}.{source}): {e} — fallback a SQLite")
 
     # Fallback SQLite + TF-IDF
     embeddings = _embed(chunks)
@@ -339,20 +350,18 @@ def ingest(source: str, text: str, metadata: dict = None, namespace: str = "gene
 
 
 def search(query: str, top_k: int = 5, source_filter: str = None, namespace: str = None,
-           tenant: str = None, chat_id: int = None) -> list:
+           tenant: str = None, chat_id: int = None, schema: str = None) -> list:
     """
-    Busca los chunks más relevantes para la query en la KB del tenant.
-    namespace: filtra por dominio (reinsurance, cukinator, personal, ...).
-    Si hay Postgres: HNSW + OpenAI embeddings. Sino: TF-IDF + SQLite.
+    Busca los chunks más relevantes para la query.
+    schema: si se pasa, busca en ese schema directo (ej. 'personal'). Sino usa
+      el del tenant resuelto de chat_id.
     """
-    # Backend Postgres
     if pg_available():
-        slug = tenant or (resolve_tenant(chat_id) if chat_id else DEFAULT_TENANT)
-        schema = tenant_schema(slug)
+        resolved = _resolve_schema(tenant=tenant, chat_id=chat_id, schema=schema)
         try:
-            return _pg_search(schema, query, top_k, namespace)
+            return _pg_search(resolved, query, top_k, namespace)
         except Exception as e:
-            log.error(f"pg search falló ({slug}): {e} — fallback a SQLite")
+            log.error(f"pg search falló ({resolved}): {e} — fallback a SQLite")
 
     # Fallback SQLite + TF-IDF
     query_vec = np.array(_embed([query])[0], dtype=np.float32)
@@ -395,13 +404,15 @@ MIN_SCORE = 0.15
 
 def build_context(query: str, top_k: int = 5, namespace: str = None,
                   min_score: float = MIN_SCORE, tenant: str = None,
-                  chat_id: int = None) -> str:
+                  chat_id: int = None, schema: str = None) -> str:
     """
     Arma el contexto RAG para incluir en el prompt de Claude.
     Solo incluye chunks con score >= min_score. Retorna "" si no hay nada relevante.
-    Multi-tenant: usa el schema del tenant resuelto del chat_id (o el explícito).
+    - schema explícito (ej. 'personal') override el tenant (para data cross-tenant).
+    - Sino, usa el schema del tenant resuelto del chat_id.
     """
-    results = search(query, top_k=top_k, namespace=namespace, tenant=tenant, chat_id=chat_id)
+    results = search(query, top_k=top_k, namespace=namespace, tenant=tenant,
+                     chat_id=chat_id, schema=schema)
     results = [r for r in results if r["score"] >= min_score]
     if not results:
         return ""
