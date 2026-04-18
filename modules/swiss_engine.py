@@ -30,7 +30,8 @@ PLANETAS = [
     (swe.URANUS,    "Urano"),
     (swe.NEPTUNE,   "Neptuno"),
     (swe.PLUTO,     "Pluton"),
-    (swe.MEAN_NODE, "Nodo N."),
+    (swe.MEAN_NODE, "Nodo Norte"),
+    (swe.CHIRON,    "Quiron"),
 ]
 
 SIGNOS = [
