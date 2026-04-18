@@ -877,9 +877,10 @@ def calc_transitos(carta_natal: dict, fecha: str = None, hora: str = None,
     }
 
 
-def formatear_transitos(transitos: dict, carta_natal: dict = None, top_n: int = 15) -> str:
-    """Render de tránsitos para Telegram/PDF."""
-    lines = [f"🪐 *Tránsitos al {transitos['fecha_transito']}*\n"]
+def formatear_transitos(transitos: dict, carta_natal: dict = None, top_n: int = 15,
+                        etiqueta_natal: str = "natal") -> str:
+    """Render de tránsitos. etiqueta_natal distingue si se aplicaron sobre natal, solar, lunar."""
+    lines = [f"🪐 *Tránsitos al {transitos['fecha_transito']}* (sobre {etiqueta_natal})\n"]
     aspectos = transitos.get("aspectos", [])
     if not aspectos:
         lines.append("_(sin aspectos dentro del orb actual)_")
@@ -888,10 +889,313 @@ def formatear_transitos(transitos: dict, carta_natal: dict = None, top_n: int = 
     for a in aspectos[:top_n]:
         apl = "→ aplicante" if a["aplicante"] else "← separándose"
         lines.append(
-            f"• *{a['planeta_transito']}* {a['simbolo']} {a['planeta_natal']} natal · "
+            f"• *{a['planeta_transito']}* {a['simbolo']} {a['planeta_natal']} {etiqueta_natal} · "
             f"orb {a['orb']}° · {apl}"
         )
 
     if len(aspectos) > top_n:
         lines.append(f"\n_… y {len(aspectos) - top_n} aspectos más de orb mayor._")
+    return "\n".join(lines)
+
+
+# ── 11. Retornos Solares y Lunares ───────────────────────────────────────────────
+# Retorno Solar (SR): carta calculada al momento exacto en que el Sol regresa a su
+# posición natal. Pasa una vez al año (cerca del cumpleaños). Establece el "tema"
+# del año — casas, ascendente del SR, aspectos a natal.
+# Retorno Lunar (LR): igual pero con la Luna, cada ~27.3 días. Tema del mes.
+# Ambos dependen del LUGAR donde estuvo la persona ese día (para las casas).
+
+def _geocode(lugar: str) -> tuple:
+    """(lat, lon, nombre) — geocodificación. Reusa el setup de to_julian_ut."""
+    geo = Nominatim(user_agent="swiss_engine_returns")
+    loc = geo.geocode(lugar, language="es", timeout=10)
+    if not loc:
+        raise ValueError(f"No se pudo geocodificar: {lugar}")
+    return (loc.latitude, loc.longitude, loc.address)
+
+
+def calc_retorno_solar(carta_natal: dict, anio: int = None,
+                       lugar_retorno: str = None) -> dict:
+    """
+    Encuentra el JD exacto del retorno solar del año dado.
+
+    Args:
+        carta_natal: output de calc_carta_completa(). Necesita planetas[Sol].lon.
+        anio: año del retorno (default año actual UTC).
+        lugar_retorno: ciudad/país donde la persona estuvo el día del retorno.
+                       Si None, usa el lugar natal (clásico, pero menos predictivo).
+
+    Returns: dict con la carta del retorno solar (mismo shape que calc_carta_completa).
+    """
+    sol_natal_lon = carta_natal["planetas"]["Sol"]["lon"]
+    anio = anio or datetime.datetime.utcnow().year
+
+    # Búsqueda: desde inicio del año buscamos el próximo cruce del Sol por la lon natal
+    jd_start = swe.julday(anio, 1, 1, 0.0)
+    try:
+        flag, tret = swe.solcross_ut(sol_natal_lon, jd_start)
+    except AttributeError:
+        # fallback: iterar manualmente si la versión de pyswisseph es vieja
+        tret = _find_return_iterative(sol_natal_lon, jd_start, swe.SUN)
+
+    # Lugar de retorno
+    if lugar_retorno:
+        lat, lon, lugar_nombre = _geocode(lugar_retorno)
+    else:
+        lat = carta_natal["debug"]["lat"]
+        lon = carta_natal["debug"]["lon"]
+        lugar_nombre = f"(lugar natal: {carta_natal['debug'].get('lugar_nombre', '?')})"
+
+    planetas = calc_planets(tret)
+    casas = calc_houses(tret, lat, lon)
+    for nombre_p, pdata in planetas.items():
+        if "error" not in pdata:
+            pdata["casa"] = assign_planet_house(pdata["lon"], casas["cusps"])
+    aspectos = calc_aspectos(planetas)
+
+    fecha_str = swe.revjul(tret, swe.GREG_CAL)  # (year, month, day, hour)
+    return {
+        "debug": {
+            "tipo":         "retorno_solar",
+            "anio":         anio,
+            "jd_ut":        tret,
+            "fecha_ut":     f"{int(fecha_str[0]):04d}-{int(fecha_str[1]):02d}-{int(fecha_str[2]):02d} {fecha_str[3]:.2f}h UTC",
+            "lat":          lat,
+            "lon":          lon,
+            "lugar_nombre": lugar_nombre,
+        },
+        "planetas": planetas,
+        "casas": {
+            "cuspides": [{"numero": i + 1, "lon": casas["cusps"][i], "signo": casas["cusps_str"][i]} for i in range(12)],
+            "asc":    {"lon": casas["asc"],    "signo": lon_to_sign(casas["asc"])},
+            "mc":     {"lon": casas["mc"],     "signo": lon_to_sign(casas["mc"])},
+            "ic":     {"lon": casas["ic"],     "signo": lon_to_sign(casas["ic"])},
+            "dc":     {"lon": casas["dc"],     "signo": lon_to_sign(casas["dc"])},
+        },
+        "aspectos": aspectos,
+    }
+
+
+def calc_retorno_lunar(carta_natal: dict, fecha_ref: str = None,
+                       lugar_retorno: str = None) -> dict:
+    """
+    Encuentra el próximo retorno lunar desde fecha_ref (default ahora).
+
+    Args:
+        carta_natal: output de calc_carta_completa().
+        fecha_ref: 'DD/MM/AAAA' — desde qué fecha buscamos el próximo retorno lunar.
+                   Si None, ahora. Como pasa cada ~27.3 días siempre hay uno cerca.
+        lugar_retorno: donde estuvo la persona ese día.
+    """
+    luna_natal_lon = carta_natal["planetas"]["Luna"]["lon"]
+
+    if fecha_ref:
+        jd_start = _jd_from_fecha(fecha_ref)
+    else:
+        jd_start = _julian_ahora_ut()
+
+    try:
+        flag, tret = swe.mooncross_ut(luna_natal_lon, jd_start)
+    except AttributeError:
+        tret = _find_return_iterative(luna_natal_lon, jd_start, swe.MOON)
+
+    if lugar_retorno:
+        lat, lon, lugar_nombre = _geocode(lugar_retorno)
+    else:
+        lat = carta_natal["debug"]["lat"]
+        lon = carta_natal["debug"]["lon"]
+        lugar_nombre = f"(lugar natal: {carta_natal['debug'].get('lugar_nombre', '?')})"
+
+    planetas = calc_planets(tret)
+    casas = calc_houses(tret, lat, lon)
+    for nombre_p, pdata in planetas.items():
+        if "error" not in pdata:
+            pdata["casa"] = assign_planet_house(pdata["lon"], casas["cusps"])
+    aspectos = calc_aspectos(planetas)
+
+    fecha_str = swe.revjul(tret, swe.GREG_CAL)
+    return {
+        "debug": {
+            "tipo":         "retorno_lunar",
+            "jd_ut":        tret,
+            "fecha_ut":     f"{int(fecha_str[0]):04d}-{int(fecha_str[1]):02d}-{int(fecha_str[2]):02d} {fecha_str[3]:.2f}h UTC",
+            "lat":          lat,
+            "lon":          lon,
+            "lugar_nombre": lugar_nombre,
+        },
+        "planetas": planetas,
+        "casas": {
+            "cuspides": [{"numero": i + 1, "lon": casas["cusps"][i], "signo": casas["cusps_str"][i]} for i in range(12)],
+            "asc":    {"lon": casas["asc"],    "signo": lon_to_sign(casas["asc"])},
+            "mc":     {"lon": casas["mc"],     "signo": lon_to_sign(casas["mc"])},
+            "ic":     {"lon": casas["ic"],     "signo": lon_to_sign(casas["ic"])},
+            "dc":     {"lon": casas["dc"],     "signo": lon_to_sign(casas["dc"])},
+        },
+        "aspectos": aspectos,
+    }
+
+
+def _find_return_iterative(target_lon: float, jd_start: float, planet_id: int,
+                            search_days: int = 400) -> float:
+    """Fallback: busca iterativamente cuándo un planeta cruza target_lon.
+    Usa bisección en ventana de search_days adelante."""
+    from swisseph import calc_ut as _cu
+    def lon_at(jd):
+        xx, _ = _cu(jd, planet_id, MOSH)
+        return xx[0]
+    step = 0.5
+    jd = jd_start
+    prev = (lon_at(jd) - target_lon) % 360
+    if prev > 180: prev -= 360
+    while jd < jd_start + search_days:
+        jd += step
+        curr = (lon_at(jd) - target_lon) % 360
+        if curr > 180: curr -= 360
+        if prev < 0 and curr >= 0:
+            # Bisección fina
+            lo, hi = jd - step, jd
+            for _ in range(40):
+                mid = (lo + hi) / 2
+                mv = (lon_at(mid) - target_lon) % 360
+                if mv > 180: mv -= 360
+                if mv < 0:
+                    lo = mid
+                else:
+                    hi = mid
+            return (lo + hi) / 2
+        prev = curr
+    raise ValueError(f"No se encontró retorno en {search_days} días desde jd={jd_start}")
+
+
+# ── 12. Activaciones: aspectos entre dos cartas (ej. retorno vs natal) ───────────
+
+def calc_activaciones(carta_base: dict, carta_activadora: dict,
+                      orb: float = 3.0) -> list:
+    """
+    Aspectos entre los planetas de carta_activadora (retorno, progresión, etc.)
+    y los planetas de carta_base (natal). Retorna lista ordenada por significancia.
+    Orbes intermedios entre tránsitos (estrictos) y natal (amplios).
+    """
+    base_planetas = carta_base.get("planetas", {})
+    act_planetas = carta_activadora.get("planetas", {})
+
+    resultado = []
+    for na, da in act_planetas.items():
+        if "error" in da:
+            continue
+        for nb, db in base_planetas.items():
+            if "error" in db:
+                continue
+            diff = abs(da["lon"] - db["lon"]) % 360
+            diff = min(diff, 360 - diff)
+            for angulo, nombre_asp, simbolo, orb_base in ASPECTOS_DEF:
+                orb_max = min(orb_base, orb)
+                orb_real = abs(diff - angulo)
+                if orb_real <= orb_max:
+                    peso = TRANSIT_WEIGHT.get(na, 1)
+                    significancia = peso * (1 - orb_real / max(orb_max, 0.01))
+                    resultado.append({
+                        "planeta_activador": na,
+                        "planeta_base":      nb,
+                        "aspecto":           nombre_asp,
+                        "simbolo":           simbolo,
+                        "angulo":            angulo,
+                        "orb":               round(orb_real, 2),
+                        "peso":              peso,
+                        "significancia":     round(significancia, 2),
+                    })
+
+    resultado.sort(key=lambda a: -a["significancia"])
+    return resultado
+
+
+def formatear_activaciones(activaciones: list, base_label: str, act_label: str,
+                           top_n: int = 15) -> str:
+    """Render de aspectos entre dos cartas."""
+    lines = [f"⚡ *Activaciones: {act_label} → {base_label}*\n"]
+    if not activaciones:
+        lines.append("_(sin activaciones dentro del orb)_")
+        return "\n".join(lines)
+    for a in activaciones[:top_n]:
+        lines.append(
+            f"• *{a['planeta_activador']}* ({act_label}) {a['simbolo']} "
+            f"*{a['planeta_base']}* ({base_label}) · orb {a['orb']}°"
+        )
+    if len(activaciones) > top_n:
+        lines.append(f"\n_… y {len(activaciones) - top_n} más._")
+    return "\n".join(lines)
+
+
+# ── 13. Análisis triple-capa (natal + solar + lunar + tránsitos) ─────────────────
+
+def calc_triple_capa(carta_natal: dict,
+                     anio_solar: int = None,
+                     lugar_solar: str = None,
+                     fecha_lunar: str = None,
+                     lugar_lunar: str = None) -> dict:
+    """
+    Análisis predictivo completo de 3 capas + tránsitos actuales:
+      - Natal (identidad base)
+      - Retorno Solar del año (tema del año)
+      - Retorno Lunar del mes (tema del mes)
+      - Tránsitos actuales sobre cada capa
+      - Activaciones cruzadas (solar/lunar sobre natal, tránsitos sobre solar/lunar)
+
+    Returns: dict con todas las capas + aspectos cruzados. Sirve como input
+    para que el LLM arme la interpretación integrada.
+    """
+    solar = calc_retorno_solar(carta_natal, anio=anio_solar, lugar_retorno=lugar_solar)
+    lunar = calc_retorno_lunar(carta_natal, fecha_ref=fecha_lunar, lugar_retorno=lugar_lunar)
+
+    return {
+        "natal": carta_natal,
+        "solar": solar,
+        "lunar": lunar,
+        "transitos": {
+            "sobre_natal": calc_transitos(carta_natal),
+            "sobre_solar": calc_transitos(solar),
+            "sobre_lunar": calc_transitos(lunar),
+        },
+        "activaciones": {
+            "solar_sobre_natal": calc_activaciones(carta_natal, solar),
+            "lunar_sobre_natal": calc_activaciones(carta_natal, lunar),
+            "lunar_sobre_solar": calc_activaciones(solar, lunar),
+        },
+    }
+
+
+def formatear_triple_capa(tc: dict, top_n: int = 8) -> str:
+    """Resumen compacto de las 3 capas + sus aspectos más significativos."""
+    lines = ["🔱 *Análisis triple-capa (natal + solar + lunar + tránsitos)*\n"]
+
+    # Cabeceras
+    lines.append(f"📍 *Natal:* {tc['natal']['debug'].get('lugar_nombre', '?')}")
+    lines.append(f"☀️ *Retorno Solar {tc['solar']['debug']['anio']}:* {tc['solar']['debug']['fecha_ut']} · {tc['solar']['debug']['lugar_nombre']}")
+    lines.append(f"🌙 *Retorno Lunar:* {tc['lunar']['debug']['fecha_ut']} · {tc['lunar']['debug']['lugar_nombre']}")
+
+    lines.append("\n━━━━━━━━━━━━━━━━━━━")
+    lines.append("⚡ *Activaciones SOLAR → NATAL (tema del año):*")
+    for a in tc["activaciones"]["solar_sobre_natal"][:top_n]:
+        lines.append(f"  • {a['planeta_activador']} {a['simbolo']} {a['planeta_base']} natal · orb {a['orb']}°")
+
+    lines.append("\n⚡ *Activaciones LUNAR → NATAL (tema del mes):*")
+    for a in tc["activaciones"]["lunar_sobre_natal"][:top_n]:
+        lines.append(f"  • {a['planeta_activador']} {a['simbolo']} {a['planeta_base']} natal · orb {a['orb']}°")
+
+    lines.append("\n⚡ *Activaciones LUNAR → SOLAR (cómo el mes dispara el año):*")
+    for a in tc["activaciones"]["lunar_sobre_solar"][:top_n]:
+        lines.append(f"  • {a['planeta_activador']} {a['simbolo']} {a['planeta_base']} solar · orb {a['orb']}°")
+
+    lines.append("\n🪐 *Tránsitos actuales sobre natal (top):*")
+    for a in tc["transitos"]["sobre_natal"].get("aspectos", [])[:top_n]:
+        lines.append(f"  • {a['planeta_transito']} {a['simbolo']} {a['planeta_natal']} · orb {a['orb']}°")
+
+    lines.append("\n🪐 *Tránsitos sobre solar (activan el tema del año):*")
+    for a in tc["transitos"]["sobre_solar"].get("aspectos", [])[:top_n]:
+        lines.append(f"  • {a['planeta_transito']} {a['simbolo']} {a['planeta_natal']} solar · orb {a['orb']}°")
+
+    lines.append("\n🪐 *Tránsitos sobre lunar (activan el tema del mes):*")
+    for a in tc["transitos"]["sobre_lunar"].get("aspectos", [])[:top_n]:
+        lines.append(f"  • {a['planeta_transito']} {a['simbolo']} {a['planeta_natal']} lunar · orb {a['orb']}°")
+
     return "\n".join(lines)

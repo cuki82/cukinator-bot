@@ -873,21 +873,78 @@ TOOLS = [
     {
         "name": "calcular_transitos",
         "description": (
-            "Calcula los tránsitos astrológicos actuales (o en una fecha específica) sobre "
-            "la carta natal de una persona. Requiere que la persona tenga un perfil guardado "
-            "(astro_guardar_perfil o uno de los que listan). Retorna los aspectos exactos "
-            "entre planetas en movimiento y planetas natales, priorizados por peso "
-            "(Saturno/Urano/Neptuno/Plutón primero, más lentos = más significativos). "
-            "Usá cuando el user pida 'qué tránsitos tengo', 'qué está activo ahora', "
-            "'tránsitos para tal fecha', etc."
+            "Calcula los tránsitos astrológicos actuales sobre una capa (natal / solar / lunar). "
+            "target='natal' (default) usa la carta natal. target='solar' usa el retorno solar del "
+            "año vigente (requiere que haya uno calculado o calcula uno con lugar_retorno si se "
+            "provee). target='lunar' igual para el retorno lunar del mes. Retorna aspectos "
+            "priorizados por significancia. Usá cuando el user pida 'qué tránsitos tengo', "
+            "'qué está activo en mi solar', 'tránsitos sobre lunar', etc."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "nombre": {"type": "string", "description": "Nombre de la persona con carta natal guardada"},
-                "fecha": {"type": "string", "description": "DD/MM/AAAA — opcional, default hoy (UTC)"},
-                "hora":  {"type": "string", "description": "HH:MM UTC — opcional, default mediodía"},
-                "orb_multiplier": {"type": "number", "description": "1.0 default; 2.0 para ver aspectos más amplios, 0.5 para solo exactos"}
+                "target": {"type": "string", "description": "natal | solar | lunar — sobre qué carta calcular tránsitos (default natal)"},
+                "fecha":  {"type": "string", "description": "DD/MM/AAAA — opcional, default hoy (UTC)"},
+                "hora":   {"type": "string", "description": "HH:MM UTC — opcional"},
+                "lugar_retorno": {"type": "string", "description": "Para target=solar/lunar, dónde estuvo la persona el día del retorno (default lugar natal)"},
+                "orb_multiplier": {"type": "number", "description": "1.0 default"}
+            },
+            "required": ["nombre"]
+        }
+    },
+    {
+        "name": "calcular_retorno_solar",
+        "description": (
+            "Calcula la carta del Retorno Solar del año (momento exacto en que el Sol regresa a "
+            "su posición natal). Establece el 'tema del año' — el ascendente del SR, las casas, "
+            "los aspectos. Requiere perfil guardado y opcionalmente lugar_retorno (donde estuvo "
+            "la persona ese día — clave porque cambia las casas)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "nombre": {"type": "string", "description": "Nombre con carta natal guardada"},
+                "anio":   {"type": "integer", "description": "Año del retorno (default año actual)"},
+                "lugar_retorno": {"type": "string", "description": "Ciudad/país donde estuvo el día del SR (default lugar natal)"}
+            },
+            "required": ["nombre"]
+        }
+    },
+    {
+        "name": "calcular_retorno_lunar",
+        "description": (
+            "Calcula el próximo Retorno Lunar desde fecha_ref (default ahora). Pasa cada ~27.3 días. "
+            "Establece el 'tema del mes'. Requiere perfil guardado. lugar_retorno: donde estuvo "
+            "la persona ese día."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "nombre": {"type": "string"},
+                "fecha_ref": {"type": "string", "description": "DD/MM/AAAA — desde cuándo buscar el próximo RL (default ahora)"},
+                "lugar_retorno": {"type": "string", "description": "Ciudad/país donde estuvo ese día (default lugar natal)"}
+            },
+            "required": ["nombre"]
+        }
+    },
+    {
+        "name": "analisis_triple_capa",
+        "description": (
+            "Análisis predictivo COMPLETO: carta natal + retorno solar del año + retorno lunar "
+            "del mes + tránsitos actuales sobre las 3 capas + activaciones cruzadas (solar → natal, "
+            "lunar → natal, lunar → solar). Retorna data estructurada para que interpretes la "
+            "integración de las 3 capas. Usá cuando el user pida 'análisis completo', 'lectura integral', "
+            "'cómo se cruza todo', 'qué me está pasando astralmente'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "nombre": {"type": "string", "description": "Nombre con carta natal guardada"},
+                "anio_solar":   {"type": "integer", "description": "Año del SR (default actual)"},
+                "lugar_solar":  {"type": "string", "description": "Dónde estuvo la persona el día del SR (default natal)"},
+                "fecha_lunar":  {"type": "string", "description": "DD/MM/AAAA desde cuándo buscar el próximo RL (default ahora)"},
+                "lugar_lunar":  {"type": "string", "description": "Dónde estuvo/estará el día del RL (default natal)"}
             },
             "required": ["nombre"]
         }
@@ -1400,6 +1457,13 @@ ASTROLOGÍA:
 - Si pide listar perfiles guardados, usás astro_listar_perfiles.
 - Si pide borrar un perfil, usás astro_eliminar_perfil.
 - Si pide tránsitos, qué le está pasando astrológicamente, qué planetas están activos, o similar, usás calcular_transitos (requiere que haya un perfil guardado de la persona — si el usuario pregunta por sí mismo, asumí que quiere "Cuki" o el nombre que tenga guardado como propio).
+- Si pide retorno solar o tema del año astral, usás calcular_retorno_solar.
+- Si pide retorno lunar o tema del mes, usás calcular_retorno_lunar.
+- Si pide análisis completo / integral / "cómo se cruza todo", usás analisis_triple_capa.
+- Para tránsitos sobre solar o sobre lunar, usás calcular_transitos con target="solar" o target="lunar".
+
+REGLA ABSOLUTA sobre perfiles astrológicos:
+NUNCA digas "guardé tu carta" o "tengo tu fecha" si no invocaste astro_guardar_perfil o no verificaste con astro_listar_perfiles. Antes de responder negativo ("no tengo guardado"), SIEMPRE llamá astro_listar_perfiles primero. Si está vacía, pedile al user los datos exactos (fecha DD/MM/AAAA, hora HH:MM, lugar) y usá astro_guardar_perfil con su confirmación. No inventes que lo guardaste si la tool devolvió error.
 - Cuando el usuario pida una ficha tecnica astrologica completa, usa calcular_carta_natal con ficha_tecnica=true. Esto devuelve el analisis tecnico completo con secciones 0-8. NO resumir, NO interpretar, mostrar el output completo tal como viene.
 - Si el usuario pide lista de cartas, menu, ver cartas o /cartas, llama a la tool astro_listar_perfiles y presenta los perfiles de forma conversacional. No uses botones desde Claude, esos se manejan por separado.
 
@@ -1877,22 +1941,125 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
 
                     elif block.name == "calcular_transitos":
                         try:
-                            from modules.swiss_engine import calc_transitos, formatear_transitos
+                            from modules.swiss_engine import (
+                                calc_transitos, formatear_transitos,
+                                calc_retorno_solar, calc_retorno_lunar,
+                            )
                             nombre = block.input["nombre"]
+                            target = (block.input.get("target") or "natal").lower()
                             datos = astro_recuperar(chat_id, nombre)
                             if not datos:
-                                result = f"No tengo carta guardada de {nombre}. Guardala primero con astro_guardar_perfil."
+                                result = f"No tengo carta guardada de {nombre}. Pedile al user los datos (fecha, hora, lugar de nacimiento) y guardala primero con astro_guardar_perfil."
                             else:
-                                carta = calcular_carta(datos["fecha"], datos["hora"], datos["lugar"])
+                                carta_natal = calcular_carta(datos["fecha"], datos["hora"], datos["lugar"])
+                                lugar_ret = block.input.get("lugar_retorno")
+                                if target == "solar":
+                                    carta_base = calc_retorno_solar(carta_natal, lugar_retorno=lugar_ret)
+                                    label = "solar"
+                                elif target == "lunar":
+                                    carta_base = calc_retorno_lunar(carta_natal, lugar_retorno=lugar_ret)
+                                    label = "lunar"
+                                else:
+                                    carta_base = carta_natal
+                                    label = "natal"
                                 fecha_t = block.input.get("fecha")
                                 hora_t  = block.input.get("hora")
                                 orb     = block.input.get("orb_multiplier", 1.0)
-                                transitos = calc_transitos(carta, fecha=fecha_t, hora=hora_t, orb_multiplier=orb)
-                                header = f"Tránsitos sobre la carta natal de {nombre.title()} ({datos['fecha']} {datos['hora']} — {datos['lugar']}):"
-                                result = header + "\n\n" + formatear_transitos(transitos, top_n=15)
+                                transitos = calc_transitos(carta_base, fecha=fecha_t, hora=hora_t, orb_multiplier=orb)
+                                header = f"Tránsitos sobre la carta {label} de {nombre.title()} ({datos['fecha']} {datos['hora']} — {datos['lugar']}):"
+                                result = header + "\n\n" + formatear_transitos(transitos, top_n=15, etiqueta_natal=label)
                         except Exception as e:
                             result = f"Error calculando tránsitos: {e}"
                             log.error(f"Astro transitos error: {e}")
+
+                    elif block.name == "calcular_retorno_solar":
+                        try:
+                            from modules.swiss_engine import calc_retorno_solar
+                            nombre = block.input["nombre"]
+                            datos = astro_recuperar(chat_id, nombre)
+                            if not datos:
+                                result = f"No tengo carta guardada de {nombre}. Guardala primero con astro_guardar_perfil (pedile los datos al user)."
+                            else:
+                                carta_natal = calcular_carta(datos["fecha"], datos["hora"], datos["lugar"])
+                                sr = calc_retorno_solar(
+                                    carta_natal,
+                                    anio=block.input.get("anio"),
+                                    lugar_retorno=block.input.get("lugar_retorno"),
+                                )
+                                lines = [
+                                    f"☀️ *Retorno Solar {sr['debug']['anio']} — {nombre.title()}*",
+                                    f"Momento exacto: {sr['debug']['fecha_ut']}",
+                                    f"Lugar: {sr['debug']['lugar_nombre']}",
+                                    "",
+                                    f"Ascendente SR: {sr['casas']['asc']['signo']}",
+                                    f"MC SR:         {sr['casas']['mc']['signo']}",
+                                    "",
+                                    "Planetas SR:",
+                                ]
+                                for n, p in sr["planetas"].items():
+                                    if "error" in p: continue
+                                    lines.append(f"  {n:10s} {p.get('signo','')} · casa {p.get('casa','?')}")
+                                lines.append("")
+                                lines.append(f"Aspectos SR internos: {len(sr['aspectos'])}")
+                                result = "\n".join(lines)
+                        except Exception as e:
+                            result = f"Error calculando retorno solar: {e}"
+                            log.error(f"SR error: {e}")
+
+                    elif block.name == "calcular_retorno_lunar":
+                        try:
+                            from modules.swiss_engine import calc_retorno_lunar
+                            nombre = block.input["nombre"]
+                            datos = astro_recuperar(chat_id, nombre)
+                            if not datos:
+                                result = f"No tengo carta guardada de {nombre}."
+                            else:
+                                carta_natal = calcular_carta(datos["fecha"], datos["hora"], datos["lugar"])
+                                lr = calc_retorno_lunar(
+                                    carta_natal,
+                                    fecha_ref=block.input.get("fecha_ref"),
+                                    lugar_retorno=block.input.get("lugar_retorno"),
+                                )
+                                lines = [
+                                    f"🌙 *Retorno Lunar — {nombre.title()}*",
+                                    f"Momento exacto: {lr['debug']['fecha_ut']}",
+                                    f"Lugar: {lr['debug']['lugar_nombre']}",
+                                    "",
+                                    f"Ascendente RL: {lr['casas']['asc']['signo']}",
+                                    f"MC RL:         {lr['casas']['mc']['signo']}",
+                                    "",
+                                    "Planetas RL:",
+                                ]
+                                for n, p in lr["planetas"].items():
+                                    if "error" in p: continue
+                                    lines.append(f"  {n:10s} {p.get('signo','')} · casa {p.get('casa','?')}")
+                                lines.append("")
+                                lines.append(f"Aspectos RL internos: {len(lr['aspectos'])}")
+                                result = "\n".join(lines)
+                        except Exception as e:
+                            result = f"Error calculando retorno lunar: {e}"
+                            log.error(f"RL error: {e}")
+
+                    elif block.name == "analisis_triple_capa":
+                        try:
+                            from modules.swiss_engine import calc_triple_capa, formatear_triple_capa
+                            nombre = block.input["nombre"]
+                            datos = astro_recuperar(chat_id, nombre)
+                            if not datos:
+                                result = f"No tengo carta guardada de {nombre}. Guardala primero."
+                            else:
+                                carta_natal = calcular_carta(datos["fecha"], datos["hora"], datos["lugar"])
+                                tc = calc_triple_capa(
+                                    carta_natal,
+                                    anio_solar=block.input.get("anio_solar"),
+                                    lugar_solar=block.input.get("lugar_solar"),
+                                    fecha_lunar=block.input.get("fecha_lunar"),
+                                    lugar_lunar=block.input.get("lugar_lunar"),
+                                )
+                                result = formatear_triple_capa(tc, top_n=8)
+                        except Exception as e:
+                            result = f"Error en análisis triple-capa: {e}"
+                            log.error(f"Triple layer error: {e}")
 
                     elif block.name == "astro_listar_perfiles":
                         try:
