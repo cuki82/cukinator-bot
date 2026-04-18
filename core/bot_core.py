@@ -1486,10 +1486,26 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
         "agent_guardar_secret", "agent_registrar_skill", "agent_log",
     }
 
+    # Tools que NUNCA le damos al LLM directamente — su uso siempre requiere
+    # confirmación explícita del user vía botones inline. Si Haiku/Sonnet/Opus
+    # las ve en el tool set, las invoca por iniciativa propia cuando intuye que
+    # "corresponde" (ej. ver una API key → agent_guardar_secret). Eso rompe la
+    # garantía de que el bot no escribe al servidor sin confirmación.
+    # Confirmado: hoy Haiku guardó una password sobre agent_secrets sola apenas
+    # la vio en el chat. El detector de credenciales + botones _handle_credential_paste
+    # cubre este caso por fuera del LLM.
+    NEVER_LLM_TOOLS = {
+        "agent_guardar_secret",   # escribe al store de secrets
+        "agent_registrar_skill",  # registra capability nueva del sistema
+        "agent_log",              # escribe al changelog
+        "config_guardar",         # escribe config versionada
+    }
+
     tools_activos = [
         t for t in TOOLS
         if (allow_voice or t["name"] != "enviar_voz")
         and (is_owner or t["name"] not in OWNER_ONLY_TOOLS)
+        and t["name"] not in NEVER_LLM_TOOLS
     ]
 
     # Límite dinámico según complejidad del mensaje
