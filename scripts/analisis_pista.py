@@ -220,6 +220,80 @@ def analizar_dia(carta_natal: dict, fecha: datetime.date) -> str:
     return "\n".join(lines)
 
 
+def generar_analisis_pista(carta_natal: dict, desde: datetime.date,
+                           hasta: datetime.date, bloque_dias: int = 5) -> str:
+    """API pública: genera el análisis astrológico en modo pista entre dos fechas.
+
+    Usada por el bot (tool analisis_pista_rango) cuando el user pide
+    'analízame en modo pista de AAAA-MM-DD a AAAA-MM-DD'. No hace I/O,
+    solo retorna el string estructurado con bloques de 5 días.
+    """
+    out = []
+    lugar = carta_natal["debug"].get("lugar_nombre", "?")
+    out.append(f"# Análisis en modo pista\n")
+    out.append(f"**Natal:** {lugar[:80]}")
+    out.append(f"**Rango:** {desde.isoformat()} → {hasta.isoformat()}\n")
+    out.append("**Planetas natales:**")
+    for n in ["Sol","Luna","Mercurio","Venus","Marte","Jupiter","Saturno","Urano","Neptuno","Pluton"]:
+        p = carta_natal["planetas"].get(n, {})
+        if "error" in p: continue
+        out.append(f"  · {n:10s} {p.get('signo','?')} · casa {p.get('casa','?')}")
+    out.append(f"ASC: {carta_natal['casas']['asc']['signo']}  MC: {carta_natal['casas']['mc']['signo']}\n")
+    out.append("━" * 60)
+
+    dias = []
+    d = desde
+    while d <= hasta:
+        dias.append(d)
+        d += datetime.timedelta(days=1)
+
+    for i in range(0, len(dias), bloque_dias):
+        bloque = dias[i:i + bloque_dias]
+        out.append(f"\n## 🔹 Bloque {bloque[0]} → {bloque[-1]}\n")
+        for dia in bloque:
+            out.append(analizar_dia(carta_natal, dia))
+        out.append("━" * 60)
+
+    return "\n".join(out)
+
+
+def generar_pdf_pista(texto_analisis: str, nombre_perfil: str = "perfil",
+                      desde: str = "", hasta: str = "", output_dir: str = "/tmp") -> str:
+    """Convierte el output markdown de generar_analisis_pista() a PDF con fpdf2.
+    Retorna el path al archivo PDF generado."""
+    from fpdf import FPDF
+    import tempfile
+    pdf = FPDF(orientation="P", unit="mm", format="A4")
+    pdf.add_page()
+    pdf.set_auto_page_break(auto=True, margin=12)
+    pdf.set_font("Helvetica", "B", 14)
+    pdf.cell(0, 8, f"Análisis en modo pista — {nombre_perfil}", ln=1)
+    pdf.set_font("Helvetica", "", 10)
+    pdf.cell(0, 6, f"Rango: {desde} → {hasta}", ln=1)
+    pdf.ln(3)
+    pdf.set_font("Courier", "", 8)
+    # Renderizar el texto línea por línea, bold para encabezados markdown
+    for raw in texto_analisis.splitlines():
+        line = raw.replace("•", "-").replace("→", "->").replace("☌", "CNJ").replace("☍", "OPP")
+        line = line.replace("□", "CUA").replace("△", "TRI").replace("⚹", "SXT").replace("🔹", "*")
+        line = line.replace("📅", "").replace("▶", ">").replace("⚠️", "!").replace("━", "-")
+        # fpdf no soporta UTF-8 pleno con fuentes default: reemplazo caracteres raros
+        line = line.encode("latin-1", errors="replace").decode("latin-1")
+        if line.startswith("**") or line.startswith("#"):
+            pdf.set_font("Courier", "B", 9)
+        else:
+            pdf.set_font("Courier", "", 8)
+        # multi_cell para wrap
+        try:
+            pdf.multi_cell(0, 4, line)
+        except Exception:
+            # Si falla (caracter exótico residual), saltar
+            pass
+    path = os.path.join(output_dir, f"analisis_pista_{nombre_perfil}_{desde}_{hasta}.pdf")
+    pdf.output(path)
+    return path
+
+
 def main():
     if len(sys.argv) < 6:
         print("Uso: analisis_pista.py FECHA_NATAL HORA_NATAL LUGAR_NATAL DESDE HASTA")
@@ -234,33 +308,8 @@ def main():
     desde = datetime.date.fromisoformat(sys.argv[4])
     hasta = datetime.date.fromisoformat(sys.argv[5])
 
-    print(f"Calculando carta natal...", file=sys.stderr)
     carta = calc_carta_completa(fecha_natal, hora_natal, lugar_natal)
-
-    print(f"# Análisis en modo pista\n")
-    print(f"**Natal:** {fecha_natal} · {hora_natal} · {carta['debug'].get('lugar_nombre','?')[:60]}")
-    print(f"**Rango:** {desde} → {hasta}\n")
-    print("**Planetas natales:**")
-    for n in ["Sol","Luna","Mercurio","Venus","Marte","Jupiter","Saturno","Urano","Neptuno","Pluton"]:
-        p = carta["planetas"].get(n, {})
-        if "error" in p: continue
-        print(f"  · {n:10s} {p.get('signo','?')} · casa {p.get('casa','?')}")
-    print(f"ASC: {carta['casas']['asc']['signo']}  MC: {carta['casas']['mc']['signo']}\n")
-    print("━" * 60)
-
-    # Iterar por días en bloques de 5
-    dias = []
-    d = desde
-    while d <= hasta:
-        dias.append(d)
-        d += datetime.timedelta(days=1)
-
-    for i in range(0, len(dias), 5):
-        bloque = dias[i:i+5]
-        print(f"\n## 🔹 Bloque {bloque[0]} → {bloque[-1]}\n")
-        for dia in bloque:
-            print(analizar_dia(carta, dia))
-        print("━" * 60)
+    print(generar_analisis_pista(carta, desde, hasta))
 
 
 if __name__ == "__main__":

@@ -929,6 +929,28 @@ TOOLS = [
         }
     },
     {
+        "name": "analisis_pista_rango",
+        "description": (
+            "Genera el análisis astrológico en modo pista entre dos fechas aplicando "
+            "las REGLAS ESTOCÁSTICAS del owner (orbes por velocidad, plenivalencia, "
+            "A/S, D/R, DESCARTES con motivo, alerta Luna, tránsitos lentos obligatorios, "
+            "bloques de 5 días). Retorna la data cruda estructurada para que DESPUÉS "
+            "vos interpretes gestalt (lentos → rápidos → Luna, correlato emocional, "
+            "integración). Requiere perfil guardado. Usar cuando el user pida "
+            "'analízame en modo pista de AAAA-MM-DD a AAAA-MM-DD' o similar."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "nombre": {"type": "string", "description": "Nombre del perfil guardado"},
+                "desde":  {"type": "string", "description": "Fecha inicio AAAA-MM-DD"},
+                "hasta":  {"type": "string", "description": "Fecha fin AAAA-MM-DD"},
+                "formato": {"type": "string", "description": "auto (default) | texto | pdf. Con auto y rango >5 días devuelve aviso para pedir formato al user."},
+            },
+            "required": ["nombre", "desde", "hasta"]
+        }
+    },
+    {
         "name": "analisis_triple_capa",
         "description": (
             "Análisis predictivo COMPLETO: carta natal + retorno solar del año + retorno lunar "
@@ -1460,6 +1482,11 @@ ASTROLOGÍA:
 - Si pide retorno solar o tema del año astral, usás calcular_retorno_solar.
 - Si pide retorno lunar o tema del mes, usás calcular_retorno_lunar.
 - Si pide análisis completo / integral / "cómo se cruza todo", usás analisis_triple_capa.
+- Si pide "analízame en modo pista de AAAA-MM-DD a AAAA-MM-DD" (o cualquier variante de rango de fechas con criterio estocástico diario): usás analisis_pista_rango. Reglas de formato:
+  · Rango ≤ 5 días: texto directo al chat.
+  · Rango > 5 días: la tool devuelve "RANGO_LARGO: ..." — cuando veas esa respuesta, pedile al user el formato con [BOTONES: 📄 PDF | 📱 Texto en bloques]. NO ejecutes el análisis todavía hasta que el user elija. Después re-invocás analisis_pista_rango con formato='pdf' o 'texto'.
+  · formato='pdf' genera el archivo y se adjunta automáticamente al mensaje.
+  · Después del análisis, ofrecé [BOTONES: 💾 Guardar en el perfil de X | ❌ No guardar].
 - Para tránsitos sobre solar o sobre lunar, usás calcular_transitos con target="solar" o target="lunar".
 
 REGLA ABSOLUTA sobre perfiles astrológicos:
@@ -2075,6 +2102,59 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
                         except Exception as e:
                             result = f"Error calculando retorno lunar: {e}"
                             log.error(f"RL error: {e}")
+
+                    elif block.name == "analisis_pista_rango":
+                        try:
+                            import datetime as _dt
+                            import sys as _sys
+                            _sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+                            from scripts.analisis_pista import generar_analisis_pista
+                            nombre = block.input["nombre"]
+                            desde  = _dt.date.fromisoformat(block.input["desde"])
+                            hasta  = _dt.date.fromisoformat(block.input["hasta"])
+                            formato = (block.input.get("formato") or "auto").lower()
+                            datos = astro_recuperar(chat_id, nombre)
+                            if not datos:
+                                result = f"No tengo carta guardada de {nombre}. Pedile los datos y guardala con astro_guardar_perfil antes."
+                            else:
+                                n_dias = (hasta - desde).days + 1
+                                # Regla del owner: >5 días NO se manda texto directo.
+                                # El LLM debe preguntar formato con botones antes.
+                                if formato == "auto" and n_dias > 5:
+                                    result = (
+                                        f"RANGO_LARGO: {n_dias} días entre {desde} y {hasta}. "
+                                        f"Antes de ejecutar: preguntale al user qué formato prefiere usando "
+                                        f"[BOTONES: 📄 PDF | 📱 Texto en bloques]. No ejecutes el análisis "
+                                        f"todavía. Cuando el user elija, re-invocá analisis_pista_rango con "
+                                        f"formato='pdf' o formato='texto'."
+                                    )
+                                else:
+                                    carta_natal = calcular_carta(datos["fecha"], datos["hora"], datos["lugar"])
+                                    texto_analisis = generar_analisis_pista(carta_natal, desde, hasta)
+                                    if formato == "pdf" or (formato == "auto" and n_dias > 30):
+                                        # Generar PDF con el análisis
+                                        try:
+                                            from scripts.analisis_pista import generar_pdf_pista
+                                            pdf_path = generar_pdf_pista(
+                                                texto_analisis,
+                                                nombre_perfil=nombre,
+                                                desde=str(desde), hasta=str(hasta),
+                                            )
+                                            with open(pdf_path, "rb") as f:
+                                                extra_files.append((f"analisis_pista_{nombre}_{desde}_{hasta}.pdf", f.read(), "pdf"))
+                                            try:
+                                                os.unlink(pdf_path)
+                                            except Exception:
+                                                pass
+                                            result = f"✅ PDF generado: {n_dias} días. Adjunto al mensaje."
+                                        except Exception as _pe:
+                                            log.error(f"PDF error: {_pe}")
+                                            result = texto_analisis  # fallback a texto
+                                    else:
+                                        result = texto_analisis
+                        except Exception as e:
+                            result = f"Error en análisis pista: {e}"
+                            log.error(f"Análisis pista error: {e}")
 
                     elif block.name == "analisis_triple_capa":
                         try:
@@ -3634,7 +3714,81 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data.startswith("astro:transitos:"):
         nombre = data.split(":", 2)[2]
-        await query.edit_message_text(f"Transitos actuales para {nombre.title()} — funcion en desarrollo.")
+        botones = [
+            [InlineKeyboardButton("🌍 Sobre la Natal",           callback_data=f"astro:trans_natal:{nombre}")],
+            [InlineKeyboardButton("☀️ Sobre la Solar (año)",      callback_data=f"astro:trans_solar:{nombre}")],
+            [InlineKeyboardButton("🌙 Sobre la Lunar (mes)",      callback_data=f"astro:trans_lunar:{nombre}")],
+            [InlineKeyboardButton("🔱 Triple capa (jerarquía)",   callback_data=f"astro:trans_triple:{nombre}")],
+            [InlineKeyboardButton("← Volver",                     callback_data=f"astro:ver:{nombre}")],
+        ]
+        await query.edit_message_text(
+            f"*Tránsitos de {nombre.title()}*\n\n¿Sobre qué capa?\n\n"
+            "• *Natal* — mapa base permanente\n"
+            "• *Solar* — tema del año (última revolución solar)\n"
+            "• *Lunar* — tema del mes (última revolución lunar)\n"
+            "• *Triple capa* — activaciones en las 3 con jerarquía (natal → solar → lunar)",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(botones),
+        )
+
+    elif data.startswith("astro:trans_natal:") or data.startswith("astro:trans_solar:") or data.startswith("astro:trans_lunar:"):
+        target = data.split(":", 2)[1].replace("trans_", "")  # natal | solar | lunar
+        nombre = data.split(":", 2)[2]
+        await query.edit_message_text(f"⏳ Calculando tránsitos sobre {target} de {nombre.title()}...")
+        try:
+            import swiss_engine as e
+            from modules.swiss_engine import (
+                calc_transitos, formatear_transitos,
+                calc_retorno_solar, calc_retorno_lunar,
+            )
+            datos = astro_recuperar(chat_id, nombre)
+            if not datos:
+                await query.edit_message_text(f"No tengo carta de {nombre.title()}.")
+                return
+            natal = e.calc_carta_completa(datos["fecha"], datos["hora"], datos["lugar"])
+            if target == "solar":
+                base = calc_retorno_solar(natal)
+                label = "solar"
+            elif target == "lunar":
+                base = calc_retorno_lunar(natal)
+                label = "lunar"
+            else:
+                base = natal
+                label = "natal"
+            trans = calc_transitos(base)
+            header = f"🪐 *Tránsitos sobre {label} — {nombre.title()}*\n"
+            header += f"📍 {datos['fecha']} · {datos['hora']} · {datos['lugar'][:40]}\n\n"
+            body = formatear_transitos(trans, top_n=20, etiqueta_natal=label)
+            await query.edit_message_text(header + body, parse_mode="Markdown")
+        except Exception as ex:
+            log.error(f"Trans {target} error: {ex}")
+            await query.edit_message_text(f"Error calculando: {ex}")
+
+    elif data.startswith("astro:trans_triple:"):
+        nombre = data.split(":", 2)[2]
+        await query.edit_message_text(f"⏳ Analizando triple capa de {nombre.title()} (natal → solar → lunar)...")
+        try:
+            import swiss_engine as e
+            from modules.swiss_engine import calc_triple_capa, formatear_triple_capa
+            datos = astro_recuperar(chat_id, nombre)
+            if not datos:
+                await query.edit_message_text(f"No tengo carta de {nombre.title()}.")
+                return
+            natal = e.calc_carta_completa(datos["fecha"], datos["hora"], datos["lugar"])
+            tc = calc_triple_capa(natal)
+            out = formatear_triple_capa(tc, top_n=8)
+            header = f"*Triple capa — {nombre.title()}*\n_Jerarquía: tránsitos sobre natal → revolución solar (fáctico) → revolución lunar (emocional)_\n\n"
+            payload = header + out
+            MAX = 3800
+            if len(payload) <= MAX:
+                await query.edit_message_text(payload, parse_mode="Markdown")
+            else:
+                await query.edit_message_text(payload[:MAX], parse_mode="Markdown")
+                for i in range(MAX, len(payload), MAX):
+                    await context.bot.send_message(chat_id=chat_id, text=payload[i:i+MAX], parse_mode="Markdown")
+        except Exception as ex:
+            log.error(f"Triple error: {ex}")
+            await query.edit_message_text(f"Error en triple capa: {ex}")
 
     elif data == "astro:cerrar":
         await query.edit_message_text("Menu cerrado.")
