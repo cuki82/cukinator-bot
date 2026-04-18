@@ -71,8 +71,24 @@ def _mask_cred(value: str) -> str:
     return value[:10] + "…" + value[-4:]
 
 
+# Placeholders típicos que aparecen en templates de Supabase/Postgres y no
+# deben guardarse como credencial real. Si el valor contiene cualquiera de
+# estos, lo rechazamos y avisamos al user.
+_PLACEHOLDER_MARKERS = [
+    "[YOUR-PASSWORD]", "[YOUR-DB-PASSWORD]", "[PASSWORD]", "[your-password]",
+    "<password>", "<YOUR_PASSWORD>", "YOUR_PASSWORD", "your_password",
+    "xxxxxxxx", "CHANGEME", "changeme",
+]
+
+
+def _looks_like_placeholder(value: str) -> bool:
+    """True si el valor parece un template sin password real rellenada."""
+    return any(marker in value for marker in _PLACEHOLDER_MARKERS)
+
+
 def _detect_credentials(text: str) -> list:
-    """Busca API keys conocidas en el texto. Retorna lista de (vault_key, value, service)."""
+    """Busca API keys conocidas en el texto. Retorna lista de (vault_key, value, service).
+    Descarta valores que contengan placeholders obvios (ej. [YOUR-PASSWORD])."""
     if not text:
         return []
     found = []
@@ -81,6 +97,11 @@ def _detect_credentials(text: str) -> list:
         for m in _re_cred.finditer(pattern, text):
             v = m.group(0)
             if v in seen_values:
+                continue
+            if _looks_like_placeholder(v):
+                # El user pegó un template con [YOUR-PASSWORD] sin rellenar.
+                # No lo guardamos: sobreescribiría una credencial real si ya estuviera.
+                log.warning(f"skip creds con placeholder: {service}")
                 continue
             seen_values.add(v)
             found.append((vault_key, v, service))
@@ -93,6 +114,16 @@ async def _handle_credential_paste(update, _context, user_msg: str) -> bool:
     Retorna True si consumió el mensaje (el caller debe return)."""
     creds = _detect_credentials(user_msg)
     if not creds:
+        # Chequear si el user pegó un template con placeholder sin rellenar
+        if any(marker in user_msg for marker in _PLACEHOLDER_MARKERS):
+            await update.message.reply_text(
+                "⚠️ Parece que pegaste un template de connection string con "
+                "`[YOUR-PASSWORD]` (u otro placeholder) sin reemplazar por la "
+                "password real.\n\nReemplazá el placeholder por la password y "
+                "reenviámelo. No guardé nada para no romper el vault.",
+                parse_mode="Markdown",
+            )
+            return True
         return False
 
     chat_id = update.effective_chat.id
