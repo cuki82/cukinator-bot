@@ -3746,6 +3746,14 @@ def _save_astro_output(chat_id: int, nombre: str, tipo: str, contenido: str) -> 
         con.commit()
         con.close()
         log.info(f"astro_output guardado: chat={chat_id} nombre={nombre} tipo={tipo} len={len(contenido or '')}")
+        # Audit: cross-tenant log
+        try:
+            from services.audit import log_event
+            log_event(action="astro_output_saved", resource=tipo,
+                      chat_id=chat_id, actor="bot",
+                      details={"nombre": nombre, "len": len(contenido or "")})
+        except Exception:
+            pass
     except Exception as e:
         log.error(f"_save_astro_output error: {e}")
 
