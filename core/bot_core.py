@@ -1834,6 +1834,7 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
     _tokens_in = 0
     _tokens_out = 0
     _cache_read = 0
+    _cache_write = 0
     _started_at = time.time()
 
     _intent = _classify(user_text)
@@ -1879,15 +1880,19 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
         total_tokens = _tokens_in + _tokens_out
         tools_part = f"\n🔧 Tools: {', '.join(_tools_used)}" if _tools_used else ""
         rag_part = "\n📚 RAG inyectado del KB" if _rag_injected else ""
-        cache_part = f" (cache {_cache_read})" if _cache_read else ""
+        # Cache info: si hay cache_read, calcular ahorro aproximado (input cost cae 90%)
+        cache_part = ""
+        if _cache_read or _cache_write:
+            saved_pct = int((_cache_read / max(_cache_read + _tokens_in, 1)) * 90)
+            cache_part = f"\n💾 Cache: {_cache_read} read · {_cache_write} write · ahorro ~{saved_pct}% input"
         sender = f"{user_name or 'Usuario'} (chat {chat_id})"
         return (
             f"\n\n━━━━━━━━━━━━━━━━━━━\n"
             f"📥 De: {sender}\n"
             f"📤 Resolvió: Claude *{model_nice}* ({intent_nice})\n"
             f"⏱️ Latencia: {elapsed:.1f}s\n"
-            f"🔢 Tokens: {total_tokens} ({_tokens_in} in / {_tokens_out} out{cache_part})"
-            f"{tools_part}{rag_part}"
+            f"🔢 Tokens: {total_tokens} ({_tokens_in} in / {_tokens_out} out)"
+            f"{cache_part}{tools_part}{rag_part}"
         )
 
     # RAG: inyectar contexto de KB para cualquier intent no-conversational.
@@ -1921,13 +1926,32 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
         except Exception as _re:
             log.debug(f"RAG skip: {_re}")
 
+    # Prompt caching (Anthropic) — marca system prompt y tools como cacheables.
+    # TTL 5 min, hasta 4 cache breakpoints. La primera llamada paga input full +
+    # 25% de write cost; las siguientes pagan ~10% del input cost. Para nuestro
+    # system de ~6k tokens + tools de ~4k tokens, ahorra ~80-90% del input cost
+    # mientras la cache esté caliente (5 min entre mensajes, típico en charla).
+    _system_text = get_system_prompt(user_name=user_name, chat_id=chat_id)
+    _system_block = [{
+        "type": "text",
+        "text": _system_text,
+        "cache_control": {"type": "ephemeral"},
+    }]
+    # Tools: marcamos el último como cacheable para que TODO el bloque de tools
+    # quede en cache (Anthropic cachea todo lo previo al cache_control breakpoint).
+    if tools_activos:
+        _tools_cached = list(tools_activos)
+        _tools_cached[-1] = {**_tools_cached[-1], "cache_control": {"type": "ephemeral"}}
+    else:
+        _tools_cached = tools_activos
+
     while iteration < max_iterations:
         iteration += 1
         response = claude.messages.create(
             model=_model,
             max_tokens=4096,
-            system=get_system_prompt(user_name=user_name, chat_id=chat_id),
-            tools=tools_activos,
+            system=_system_block,
+            tools=_tools_cached,
             messages=messages
         )
         # Acumular usage para el trace footer
@@ -1936,14 +1960,18 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
             if _u:
                 _ti = getattr(_u, "input_tokens", 0) or 0
                 _to = getattr(_u, "output_tokens", 0) or 0
+                _cw = getattr(_u, "cache_creation_input_tokens", 0) or 0
+                _cr = getattr(_u, "cache_read_input_tokens", 0) or 0
                 _tokens_in  += _ti
                 _tokens_out += _to
-                _cache_read += getattr(_u, "cache_read_input_tokens", 0) or 0
-                # Registrar usage en shared.tenant_usage (fail silent si no hay PG)
+                _cache_read += _cr
+                _cache_write += _cw
+                # Registrar usage en shared.tenant_usage (incluye cache)
                 try:
                     from services.usage import record as _rec
                     from services.tenants import resolve_tenant as _rt2
-                    _rec(_rt2(chat_id), _model, _ti, _to)
+                    _rec(_rt2(chat_id), _model, _ti, _to,
+                         cache_read=_cr, cache_write=_cw)
                 except Exception:
                     pass
         except Exception:

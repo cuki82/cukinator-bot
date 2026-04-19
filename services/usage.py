@@ -43,16 +43,23 @@ PRICES = {
 }
 
 
-def estimate_cost(model: str, tokens_in: int, tokens_out: int) -> float:
-    """Retorna costo estimado en USD para esa llamada."""
-    price_in, price_out = PRICES.get(model, (3.0, 15.0))  # default Sonnet
-    return (tokens_in * price_in + tokens_out * price_out) / 1_000_000.0
+def estimate_cost(model: str, tokens_in: int, tokens_out: int,
+                  cache_read: int = 0, cache_write: int = 0) -> float:
+    """Costo estimado USD considerando prompt caching (Anthropic):
+        cache_write: 1.25× input price (escribir al cache la primera vez)
+        cache_read:  0.10× input price (leer del cache, mucho más barato)
+    """
+    price_in, price_out = PRICES.get(model, (3.0, 15.0))
+    base = (tokens_in * price_in + tokens_out * price_out)
+    cache_extra = (cache_write * price_in * 1.25 + cache_read * price_in * 0.10)
+    return (base + cache_extra) / 1_000_000.0
 
 
-def record(tenant: str, model: str, tokens_in: int, tokens_out: int) -> float:
+def record(tenant: str, model: str, tokens_in: int, tokens_out: int,
+           cache_read: int = 0, cache_write: int = 0) -> float:
     """Registra el uso en shared.tenant_usage. Retorna el cost_usd calculado.
     Fail silent si no hay PG — no debe bloquear al bot."""
-    cost = estimate_cost(model, tokens_in, tokens_out)
+    cost = estimate_cost(model, tokens_in, tokens_out, cache_read, cache_write)
     try:
         from services.db import pg_available, pg_conn
         if not pg_available() or not tenant:
