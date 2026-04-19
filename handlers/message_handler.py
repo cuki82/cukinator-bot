@@ -547,6 +547,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as _ctx_e:
         log.debug(f"ctx routing skip: {_ctx_e}")
 
+    # Hard guard: si el mensaje tiene señales fuertes de VPS/DevOps/código y
+    # NO fue clasificado como coding, forzar routing al worker. Esto evita que
+    # Haiku/Sonnet directo se pongan a leer/ejecutar en el VPS con sus tools
+    # (aunque las tools peligrosas ya están en NEVER_LLM_TOOLS, reforzamos).
+    import re as _re_guard
+    _hard_vps_signals = [
+        r"\b(systemctl|journalctl|docker|nginx|uvicorn)\b",
+        r"\bvps\b", r"\bservidor\b.*(entrá|accede|conect)",
+        r"\bssh\b", r"\bchmod\b", r"\bchown\b",
+        r"/home/cukibot", r"\.service\b", r"\bcommit\b",
+        r"\b(cat|grep|sed|awk|tail|head|find|ls|wc)\s+(-\w+\s+)?[/\w]",
+    ]
+    if (classified not in ("coding",)
+            and any(_re_guard.search(p, user_msg, _re_guard.IGNORECASE) for p in _hard_vps_signals)
+            and _WORKER_ENABLED):
+        log.info(f"[{chat_id}] hard guard: forcing coding intent (vps signal detected)")
+        try:
+            from services.audit import log_event
+            log_event(action="guard_forced_coding", resource="intent_router",
+                      chat_id=chat_id, actor="system",
+                      details={"original_intent": classified, "msg_preview": user_msg[:80]})
+        except Exception:
+            pass
+        classified = "coding"
+
     # Routing: coding intent -> agent_worker en el VPS
     if _WORKER_ENABLED and classified == "coding":
         await update.message.reply_text("Entendido, lo proceso con el Agent Worker en el VPS...")

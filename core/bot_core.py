@@ -1006,6 +1006,28 @@ TOOLS = [
         }
     },
     {
+        "name": "generar_diseno",
+        "description": (
+            "Genera assets de diseño delegando al Agent Designer (VPS :3340). "
+            "type='html' → página/componente con Tailwind; type='pdf' → PDF "
+            "corporativo con branding del manual de identidad (RAG ns='brand' "
+            "del tenant); type='critique' → revisa un diseño existente (pasar "
+            "reference=HTML/texto). Usá cuando el user pida 'armá un brochure', "
+            "'hacé un landing', 'presentación para cliente', 'revisá este mockup', "
+            "'generame un PDF con el formato corporativo', etc."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "brief":     {"type": "string", "description": "Qué hay que diseñar (descripción natural)"},
+                "type":      {"type": "string", "description": "html | pdf | critique (default html)"},
+                "target":    {"type": "string", "description": "Audiencia/destino (ej. 'cliente reaseguros', 'interno')"},
+                "reference": {"type": "string", "description": "Solo para type=critique: el HTML o texto a revisar"},
+            },
+            "required": ["brief"]
+        }
+    },
+    {
         "name": "analisis_pista_rango",
         "description": (
             "Genera el análisis astrológico en modo pista entre dos fechas aplicando "
@@ -1566,6 +1588,19 @@ ASTROLOGÍA:
   · Después del análisis, ofrecé [BOTONES: 💾 Guardar en el perfil de X | ❌ No guardar].
 - Para tránsitos sobre solar o sobre lunar, usás calcular_transitos con target="solar" o target="lunar".
 
+REGLA ABSOLUTA sobre el VPS y el repo:
+NUNCA ejecutes ni leas archivos del VPS (no tenés tools vps_exec, vps_leer,
+vps_escribir, vps_docker, github_push, github_pr — están deshabilitadas a
+propósito para vos). Toda acción sobre VPS, repo, código, systemd, docker,
+logs o servicios debe pasar por el Agent Worker (Codex+ClaudeCodeCLI
+supervisado). Si el user pide cosas como "mirá el código", "revisá el archivo",
+"cambiá tal cosa", "corré este comando en el VPS", "por qué no anda tal
+función", etc — decile que reformule la instrucción con palabras claras de
+coding/DevOps para que el intent router la mande al worker. NO intentes
+debuggear vos mismo, NO infieras desde logs, NO uses otras tools para
+circunscribir el VPS. Estás en el path de conversación, no en el path de
+ejecución.
+
 REGLA ABSOLUTA sobre perfiles astrológicos:
 NUNCA digas "guardé tu carta" o "tengo tu fecha" si no invocaste astro_guardar_perfil o no verificaste con astro_listar_perfiles. Antes de responder negativo ("no tengo guardado"), SIEMPRE llamá astro_listar_perfiles primero. Si está vacía, pedile al user los datos exactos (fecha DD/MM/AAAA, hora HH:MM, lugar) y usá astro_guardar_perfil con su confirmación. No inventes que lo guardaste si la tool devolvió error.
 
@@ -1744,19 +1779,30 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
         "agent_guardar_secret", "agent_registrar_skill", "agent_log",
     }
 
-    # Tools que NUNCA le damos al LLM directamente — su uso siempre requiere
-    # confirmación explícita del user vía botones inline. Si Haiku/Sonnet/Opus
-    # las ve en el tool set, las invoca por iniciativa propia cuando intuye que
-    # "corresponde" (ej. ver una API key → agent_guardar_secret). Eso rompe la
-    # garantía de que el bot no escribe al servidor sin confirmación.
-    # Confirmado: hoy Haiku guardó una password sobre agent_secrets sola apenas
-    # la vio en el chat. El detector de credenciales + botones _handle_credential_paste
-    # cubre este caso por fuera del LLM.
+    # Tools que NUNCA le damos al LLM directamente. Motivación doble:
+    #   1) Write/persist silencioso (agent_guardar_secret, config_guardar, etc.)
+    #      → el LLM por iniciativa propia escribe al sistema sin consentimiento.
+    #   2) Ejecutar en el VPS (vps_*, github_push, github_pr) → el LLM directo
+    #      se pone a DEBUGGEAR solo leyendo código, ejecutando comandos shell
+    #      y sacando conclusiones, saltándose el Agent Worker que es el path
+    #      supervisado. Confirmado el 19/04: Haiku/Sonnet invocaron vps_leer
+    #      y vps_exec repetidas veces cuando el user reportó un problema de
+    #      voz, en vez de delegar al worker.
+    # Toda operación sobre el VPS o el repo DEBE pasar por el Agent Worker
+    # (intent=coding → agent_worker :3335 con Codex+ClaudeCodeCLI supervisado).
     NEVER_LLM_TOOLS = {
-        "agent_guardar_secret",   # escribe al store de secrets
-        "agent_registrar_skill",  # registra capability nueva del sistema
-        "agent_log",              # escribe al changelog
-        "config_guardar",         # escribe config versionada
+        # --- Escritura / persistencia ---
+        "agent_guardar_secret",
+        "agent_registrar_skill",
+        "agent_log",
+        "config_guardar",
+        # --- Ejecución sobre el VPS / repo ---
+        "vps_exec",
+        "vps_leer_archivo",
+        "vps_escribir_archivo",
+        "vps_docker",
+        "github_push",
+        "github_pr",
     }
 
     # Per-tenant tool whitelist: si el tenant declaró tools_enabled en su
