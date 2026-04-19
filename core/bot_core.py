@@ -2287,6 +2287,55 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
                             result = f"Error calculando retorno lunar: {e}"
                             log.error(f"RL error: {e}")
 
+                    elif block.name == "generar_diseno":
+                        try:
+                            import requests as _req_dsg
+                            import uuid as _uuid_dsg
+                            from pathlib import Path as _Path_dsg
+                            from services.tenants import resolve_tenant as _rt_dsg
+                            brief = block.input["brief"]
+                            dtype = block.input.get("type") or "html"
+                            target = block.input.get("target")
+                            reference = block.input.get("reference")
+                            tenant_slug = _rt_dsg(chat_id)
+                            designer_url = os.environ.get("AGENT_DESIGNER_URL", "http://127.0.0.1:3340")
+                            designer_secret = os.environ.get("DESIGNER_SECRET") or os.environ.get("WORKER_SECRET", "cuki-designer-secret")
+                            payload = {
+                                "task_id": str(_uuid_dsg.uuid4())[:8],
+                                "type": dtype,
+                                "tenant": tenant_slug,
+                                "chat_id": chat_id,
+                                "brief": brief,
+                                "target": target,
+                                "reference": reference,
+                            }
+                            r = _req_dsg.post(
+                                f"{designer_url}/design", json=payload,
+                                headers={"X-Designer-Secret": designer_secret},
+                                timeout=180,
+                            )
+                            if r.status_code == 200:
+                                dres = r.json()
+                                result = f"Designer {dtype} · {dres.get('duration_s','?')}s · {dres.get('brand_chunks_used',0)} brand chunks"
+                                out_text = dres.get("output_text") or ""
+                                out_file = dres.get("output_file")
+                                if out_text and len(out_text) < 3500 and dtype in ("html","critique"):
+                                    result += "\n\n" + out_text
+                                if out_file and os.path.exists(out_file):
+                                    with open(out_file, "rb") as _f:
+                                        caption = f"Designer {dtype} — {_Path_dsg(out_file).name}"
+                                        extra_files.append((_Path_dsg(out_file).name, _f.read(), caption))
+                                errs = dres.get("errors") or []
+                                if errs:
+                                    result += f"\n⚠️ {'; '.join(errs[:2])}"
+                            else:
+                                result = f"Error designer HTTP {r.status_code}: {r.text[:200]}"
+                        except _req_dsg.ConnectionError:
+                            result = "No puedo conectar al Agent Designer (:3340)."
+                        except Exception as e:
+                            result = f"Error generar_diseno: {e}"
+                            log.error(f"designer dispatch err: {e}")
+
                     elif block.name == "analisis_pista_rango":
                         try:
                             import datetime as _dt
