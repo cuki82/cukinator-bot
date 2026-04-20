@@ -13,3 +13,5 @@ oauth_flow.pkl
 .env.local
 # Added by code-review-graph
 .code-review-graph/
+# Claude Code local settings
+.claude/settings.local.json

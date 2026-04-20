@@ -212,20 +212,21 @@ def verdict(scan_result: dict) -> str:
 def report(result: dict) -> None:
     scan = result.get("scan", result)
     v = verdict(scan)
-    icon = {"DANGEROUS": "🚨", "SUSPICIOUS": "⚠️", "REVIEW_RECOMMENDED": "🔍", "SAFE": "✅"}.get(v, "?")
-    print(f"\n{icon} VERDICT: {v}")
+    # ASCII-only label para evitar UnicodeEncodeError en Windows cp1252.
+    label = {"DANGEROUS": "[!!] ", "SUSPICIOUS": "[!] ", "REVIEW_RECOMMENDED": "[?] ", "SAFE": "[ok] "}.get(v, "[-] ")
+    print(f"\n{label}VERDICT: {v}")
     print(f"   files_scanned: {scan.get('files_scanned', '?')}")
     print(f"   dangerous: {len(scan.get('dangerous', []))}")
     print(f"   suspicious: {len(scan.get('suspicious', []))}")
     if scan.get("dangerous"):
-        print("\n  🚨 DANGEROUS findings:")
+        print("\n  [!!] DANGEROUS findings:")
         for f in scan["dangerous"][:20]:
-            print(f"    • {f.get('file', '?')}:{f.get('line', '?')} — {f.get('pattern', '?')}")
+            print(f"    - {f.get('file', '?')}:{f.get('line', '?')} -- {f.get('pattern', '?')}")
             print(f"        {f.get('match', '')[:100]}")
     if scan.get("suspicious"):
-        print("\n  ⚠️  SUSPICIOUS findings (first 10):")
+        print("\n  [!] SUSPICIOUS findings (first 10):")
         for f in scan["suspicious"][:10]:
-            print(f"    • {f.get('file', '?')}:{f.get('line', '?')} — {f.get('pattern', '?')}")
+            print(f"    - {f.get('file', '?')}:{f.get('line', '?')} -- {f.get('pattern', '?')}")
 
 
 def main():

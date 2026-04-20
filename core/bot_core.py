@@ -885,6 +885,25 @@ TOOLS = [
         }
     },
     {
+        "name": "image_gen",
+        "description": (
+            "Genera una imagen con DALL-E 3 (OpenAI) y la envía al chat. "
+            "Usá cuando el user pida 'generá una imagen', 'dibujá', 'creá un logo', "
+            "'imagen de X', 'render', 'mockup visual', etc. Devuelve la imagen como adjunto. "
+            "NO uses para diseño web/HTML (eso va al designer). Solo para imágenes raster (foto, ilustración, arte)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "prompt": {"type": "string", "description": "Prompt en inglés (DALL-E entiende mejor inglés). Sé descriptivo: estilo, composición, iluminación, mood. Ej: 'a minimalist isometric illustration of a modern reinsurance office, blue and gold palette, high detail, vector style'"},
+                "size":   {"type": "string", "description": "1024x1024 (default, square) | 1792x1024 (landscape) | 1024x1792 (portrait)"},
+                "quality": {"type": "string", "description": "standard (default, $0.04) | hd (mejor detalle, $0.08)"},
+                "style":   {"type": "string", "description": "vivid (default, hiperrealista/dramático) | natural (más fotográfico, menos saturado)"},
+            },
+            "required": ["prompt"]
+        }
+    },
+    {
         "name": "enviar_voz",
         "description": (
             "Envía tu respuesta como mensaje de voz. "
@@ -2133,6 +2152,40 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
                         except Exception as e:
                             result = f"Error buscando video: {e}"
                             log.error(f"buscar_video error: {e}")
+
+                    elif block.name == "image_gen":
+                        try:
+                            from openai import OpenAI
+                            import requests as _rq_img
+                            _oai_key = os.environ.get("OPENAI_API_KEY", "")
+                            if not _oai_key:
+                                result = "image_gen: falta OPENAI_API_KEY en env"
+                            else:
+                                _oai = OpenAI(api_key=_oai_key)
+                                _prompt = block.input.get("prompt", "")[:4000]
+                                _size   = block.input.get("size", "1024x1024")
+                                _quality = block.input.get("quality", "standard")
+                                _style   = block.input.get("style", "vivid")
+                                if _size not in ("1024x1024", "1792x1024", "1024x1792"):
+                                    _size = "1024x1024"
+                                _resp_img = _oai.images.generate(
+                                    model="dall-e-3",
+                                    prompt=_prompt,
+                                    size=_size,
+                                    quality=_quality if _quality in ("standard", "hd") else "standard",
+                                    style=_style if _style in ("vivid", "natural") else "vivid",
+                                    n=1,
+                                )
+                                _img_url = _resp_img.data[0].url
+                                _revised = getattr(_resp_img.data[0], "revised_prompt", _prompt)
+                                _img_bytes = _rq_img.get(_img_url, timeout=30).content
+                                _fname = f"dalle_{int(time.time())}.png"
+                                extra_files.append((_fname, _img_bytes, f"DALL-E 3 · {_size} · {_quality}"))
+                                result = f"[imagen generada: {_fname} ({len(_img_bytes)//1024} KB) · revised: {_revised[:200]}]"
+                                log.info(f"[{chat_id}] image_gen ok ({_size}, {_quality})")
+                        except Exception as e:
+                            result = f"image_gen error: {e}"
+                            log.warning(f"[{chat_id}] image_gen fail: {e}")
 
                     elif block.name == "enviar_voz":
                         try:
@@ -4678,6 +4731,11 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("voz",        cmd_voz))
     app.add_handler(CommandHandler("menu",       cmd_menu))
     app.add_handler(CommandHandler("biblioteca", cmd_biblioteca))
+    try:
+        from handlers.message_handler import cmd_qr as _cmd_qr_legacy
+        app.add_handler(CommandHandler("qr",     _cmd_qr_legacy))
+    except Exception:
+        pass
     app.add_handler(CallbackQueryHandler(handle_biblioteca_callback, pattern="^lib:"))
     app.add_handler(CallbackQueryHandler(handle_menu_callback, pattern="^menu:"))
     app.add_handler(CallbackQueryHandler(handle_voz_callback,  pattern="^voz:"))

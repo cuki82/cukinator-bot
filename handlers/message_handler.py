@@ -682,6 +682,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await context.bot.send_video(chat_id=chat_id,
                         video=io.BytesIO(contenido), filename=nombre_f,
                         caption=titulo_vid, supports_streaming=True)
+                elif nombre_f.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
+                    await context.bot.send_chat_action(chat_id=chat_id, action="upload_photo")
+                    await context.bot.send_photo(chat_id=chat_id,
+                        photo=io.BytesIO(contenido), caption=caption[:1024])
                 else:
                     await context.bot.send_chat_action(chat_id=chat_id, action="upload_document")
                     await context.bot.send_document(chat_id=chat_id,
@@ -823,6 +827,10 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 elif caption == "video_link":
                     lines = contenido.decode().split("\n")
                     await context.bot.send_message(chat_id=chat_id, text="\n".join(lines[:3]))
+                elif nombre_f.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
+                    await context.bot.send_chat_action(chat_id=chat_id, action="upload_photo")
+                    await context.bot.send_photo(chat_id=chat_id,
+                        photo=io.BytesIO(contenido), caption=caption[:1024])
                 else:
                     await context.bot.send_chat_action(chat_id=chat_id, action="upload_document")
                     await context.bot.send_document(chat_id=chat_id,
@@ -1026,3 +1034,43 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         log.error(f"Error procesando foto: {e}")
         await update.message.reply_text(f"Error procesando la imagen: {e}")
+
+
+async def cmd_qr(update, context):
+    """Genera QR code del texto/URL pasado. /qr <texto o URL>
+    Ejemplos:
+      /qr https://reamerica.com.ar
+      /qr WIFI:T:WPA;S:MiRed;P:secret;;
+      /qr Hola, este es un QR
+    """
+    import io
+    chat_id = update.effective_chat.id
+    args = context.args or []
+    if not args:
+        await update.message.reply_text(
+            "Uso: `/qr <texto o URL>`\n"
+            "Ejemplos:\n"
+            "• `/qr https://reamerica.com.ar`\n"
+            "• `/qr WIFI:T:WPA;S:MiRed;P:secret;;`",
+            parse_mode="Markdown"
+        )
+        return
+    data = " ".join(args)[:2000]
+    try:
+        import qrcode
+        from qrcode.constants import ERROR_CORRECT_M
+        qr = qrcode.QRCode(version=None, error_correction=ERROR_CORRECT_M,
+                           box_size=10, border=2)
+        qr.add_data(data)
+        qr.make(fit=True)
+        img = qr.make_image(fill_color="black", back_color="white")
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        buf.seek(0)
+        cap = data if len(data) <= 100 else data[:97] + "..."
+        await context.bot.send_chat_action(chat_id=chat_id, action="upload_photo")
+        await context.bot.send_photo(chat_id=chat_id, photo=buf, caption=cap)
+        log.info(f"[{chat_id}] QR generado ({len(data)} chars)")
+    except Exception as e:
+        log.error(f"[{chat_id}] /qr error: {e}")
+        await update.message.reply_text(f"Error generando QR: {e}")

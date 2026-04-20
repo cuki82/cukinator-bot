@@ -1,0 +1,19 @@
+[Unit]
+Description=Cukinator — auto-pair Remote Control (Claude Code en tmux)
+After=network-online.target
+Wants=network-online.target
+# Si el script falla, no rompemos boot del user: solo log.
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=WORKDIR=%h/cukinator-bot
+Environment=PREFIX=VPS
+ExecStart=%h/.local/bin/cuki-remote.sh
+ExecStop=/usr/bin/tmux kill-session -t cuki-remote
+# Sin Restart= (oneshot). Si el tmux session muere, este service queda
+# "active (exited)" pero el tmux ya no existe. Para reactivar:
+#   systemctl --user restart cukinator-remote.service
+
+[Install]
+WantedBy=default.target
