@@ -1069,13 +1069,16 @@ async def cmd_sf(update, context):
         )
         return
 
-    # Modo CLI directo (con args)
+    # Modo CLI / natural language
     try:
         from services.salesforce import sf_query, sf_describe, sf_list_objects, is_select_only
         from services.tenants import resolve_tenant
         tslug = resolve_tenant(chat_id) or "reamerica"
-        sub = args[0].lower()
-        if sub == "describe" and len(args) >= 2:
+        full = " ".join(args).strip()
+        first = args[0].lower()
+
+        # Subcomandos exactos
+        if first == "describe" and len(args) >= 2:
             obj = args[1]
             d = sf_describe(obj, tenant=tslug, env="uat")
             fields = d.get("fields", [])
@@ -1085,7 +1088,7 @@ async def cmd_sf(update, context):
                 lines.append(f"`{f['name']}` ({f.get('type')}){tag} — {f.get('label','')[:50]}")
             await update.message.reply_text("\n".join(lines)[:4000], parse_mode="Markdown")
             return
-        if sub == "list":
+        if first == "list":
             objs = sf_list_objects(tenant=tslug, env="uat")
             lines = [f"*{len(objs)} sObjects queryables:*"]
             for o in objs[:80]:
@@ -1093,27 +1096,69 @@ async def cmd_sf(update, context):
                 lines.append(f"`{o['name']}`{tag} — {o['label']}")
             await update.message.reply_text("\n".join(lines)[:4000], parse_mode="Markdown")
             return
-        # Default: SOQL crudo. HARD GUARD: solo SELECT.
-        soql = " ".join(args)
-        if not is_select_only(soql):
+
+        # SOQL crudo (empieza con SELECT). Hard guard read-only.
+        if first == "select":
+            if not is_select_only(full):
+                await update.message.reply_text(
+                    "❌ *Bloqueado.* Salesforce está en modo SOLO LECTURA. "
+                    "Solo `SELECT` puro (sin INSERT/UPDATE/DELETE/MERGE/UPSERT, sin `;`).",
+                    parse_mode="Markdown"
+                )
+                return
+            rows = sf_query(full, tenant=tslug, env="uat", max_records=50)
+            if not rows:
+                await update.message.reply_text(f"Sin resultados para:\n`{full}`", parse_mode="Markdown")
+                return
+            clean = [{k: v for k, v in r.items() if k != "attributes"} for r in rows[:25]]
+            import json as _j
+            body = _j.dumps(clean, indent=1, ensure_ascii=False, default=str)[:3700]
             await update.message.reply_text(
-                "❌ *Bloqueado.* Salesforce está configurado en modo SOLO LECTURA.\n"
-                "Solo se permiten queries `SELECT`. Para INSERT/UPDATE/DELETE, "
-                "usá la UI de Salesforce y después puedo leer los cambios.",
+                f"*{len(rows)} registros* (primeros 25):\n```json\n{body}\n```",
                 parse_mode="Markdown"
             )
             return
-        rows = sf_query(soql, tenant=tslug, env="uat", max_records=50)
-        if not rows:
-            await update.message.reply_text(f"Sin resultados para:\n`{soql}`", parse_mode="Markdown")
+
+        # Caso default: pregunta en lenguaje natural sobre Salesforce.
+        # Delegar al LLM con prefijo "Salesforce:" para forzar intent=reinsurance,
+        # que tiene sf_consultar disponible + el mapa de schema en el system prompt.
+        from core.bot_core import ask_claude, save_message_full, DB_PATH, send_long_message
+        import asyncio, io, queue, threading
+        natural = "Salesforce: " + full
+        name = update.effective_user.first_name or "Usuario"
+        await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+
+        q = queue.Queue()
+        def run_claude():
+            try:
+                q.put(("ok", ask_claude(chat_id, natural, user_name=name, allow_voice=False)))
+            except Exception as e:
+                q.put(("err", str(e)))
+        t = threading.Thread(target=run_claude, daemon=True)
+        t.start()
+
+        elapsed = 0
+        while t.is_alive() and elapsed < 120:
+            await asyncio.sleep(3)
+            elapsed += 3
+            if t.is_alive():
+                try:
+                    await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+                except Exception:
+                    pass
+
+        t.join(timeout=1)
+        if t.is_alive():
+            await update.message.reply_text("Tardo demasiado, intentalo de nuevo.")
             return
-        clean = [{k: v for k, v in r.items() if k != "attributes"} for r in rows[:25]]
-        import json as _j
-        body = _j.dumps(clean, indent=1, ensure_ascii=False, default=str)[:3700]
-        await update.message.reply_text(
-            f"*{len(rows)} registros* (primeros 25):\n```json\n{body}\n```",
-            parse_mode="Markdown"
-        )
+        status, payload = q.get(timeout=2)
+        if status == "err":
+            raise Exception(payload)
+        reply, _pdf, _extras = payload
+        save_message_full(chat_id, "user",      natural, db_path=DB_PATH)
+        save_message_full(chat_id, "assistant", reply,   db_path=DB_PATH)
+        await send_long_message(context.bot, chat_id, reply, reply_to=update.message)
+
     except Exception as e:
         log.error(f"[{chat_id}] /sf error: {e}")
         await update.message.reply_text(f"Error: {str(e)[:300]}")
