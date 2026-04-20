@@ -714,6 +714,87 @@ def gmail_descargar_adjunto(email_id: str, attachment_index: int = 0) -> tuple:
     content = base64.b64decode(att["data_b64"])
     return (f"Adjunto descargado: {att['name']}", att["name"], content)
 
+
+# ── Outlook corporativo (Microsoft Graph API) ─────────────────────────────────
+
+def outlook_inbox(user: str, tenant: str = "reamerica", days: int = 7,
+                  top: int = 20, unread: bool = False) -> str:
+    from services.outlook import outlook_inbox as _inbox
+    try:
+        msgs = _inbox(user=user, days=days, unread=unread, tenant=tenant, top=top)
+    except Exception as e:
+        return f"Error leyendo Outlook ({tenant}): {e}"
+    if not msgs:
+        return "No encontré emails con ese criterio."
+    lines = []
+    for i, m in enumerate(msgs, 1):
+        unread_icon = "🔵" if not m.get("isRead") else "⚪"
+        sender = m.get("from", {}).get("emailAddress", {})
+        fecha = m.get("receivedDateTime", "")[:10]
+        lines.append(f"{unread_icon} [{i}] {sender.get('name', sender.get('address', '?'))}")
+        lines.append(f"     {m.get('subject', '(sin asunto)')} — {fecha}")
+        preview = m.get("bodyPreview", "").replace("\n", " ")[:160]
+        lines.append(f"     {preview}...")
+        lines.append(f"     id: {m.get('id','')}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def outlook_leer(user: str, message_id: str, tenant: str = "reamerica") -> str:
+    from services.outlook import outlook_thread as _thread
+    try:
+        m = _thread(user=user, message_id=message_id, tenant=tenant)
+    except Exception as e:
+        return f"Error leyendo mensaje Outlook: {e}"
+    sender = m.get("from", {}).get("emailAddress", {})
+    to_list = [r.get("emailAddress", {}).get("address", "") for r in m.get("toRecipients", [])]
+    body = m.get("body", {})
+    content = body.get("content", "")
+    if body.get("contentType") == "html":
+        import re
+        content = re.sub(r"<[^>]+>", " ", content)
+        content = re.sub(r"\s{2,}", " ", content).strip()
+    lines = [
+        f"De: {sender.get('name', sender.get('address', '?'))} <{sender.get('address', '')}>",
+        f"Para: {', '.join(to_list)}",
+        f"Asunto: {m.get('subject', '')}",
+        f"Fecha: {m.get('receivedDateTime', '')[:19]}",
+        "",
+        content[:4000],
+    ]
+    return "\n".join(lines)
+
+
+def outlook_buscar(user: str, query: str, tenant: str = "reamerica", top: int = 15) -> str:
+    from services.outlook import outlook_search as _search
+    try:
+        msgs = _search(user=user, query=query, tenant=tenant, top=top)
+    except Exception as e:
+        return f"Error buscando en Outlook: {e}"
+    if not msgs:
+        return "No encontré resultados para esa búsqueda."
+    lines = []
+    for i, m in enumerate(msgs, 1):
+        sender = m.get("from", {}).get("emailAddress", {})
+        fecha = m.get("receivedDateTime", "")[:10]
+        lines.append(f"[{i}] {sender.get('name', sender.get('address', '?'))} — {fecha}")
+        lines.append(f"     {m.get('subject', '(sin asunto)')}")
+        lines.append(f"     id: {m.get('id','')}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def outlook_enviar(from_user: str, to: list, subject: str, body_html: str,
+                   tenant: str = "reamerica", cc: list = None) -> str:
+    from services.outlook import outlook_send as _send
+    try:
+        _send(from_user=from_user, to=to, subject=subject, body_html=body_html,
+              cc=cc, tenant=tenant)
+        return f"Email enviado desde {from_user} a {', '.join(to)} ✅"
+    except Exception as e:
+        return f"Error enviando email Outlook: {e}"
+
+
 def calendar_ver(desde: str = None, hasta: str = None) -> str:
     import datetime
     from zoneinfo import ZoneInfo
@@ -1498,6 +1579,72 @@ TOOLS = [
             },
             "required": ["action"]
         }
+    },
+    {
+        "name": "outlook_inbox",
+        "description": (
+            "Lee el inbox del email corporativo de Reamerica (Microsoft Outlook vía Graph API). "
+            "Usá para leer emails de mromanelli@reamerica-re.com u otros usuarios del tenant. "
+            "Por defecto muestra los últimos 7 días. Soporta filtro de no leídos."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "user":   {"type": "string",  "description": "Email del usuario, ej: mromanelli@reamerica-re.com"},
+                "tenant": {"type": "string",  "description": "Tenant corporativo (default: reamerica)"},
+                "days":   {"type": "integer", "description": "Días hacia atrás (default: 7)"},
+                "top":    {"type": "integer", "description": "Cantidad máxima de emails (default: 20)"},
+                "unread": {"type": "boolean", "description": "Solo no leídos (default: false)"}
+            },
+            "required": ["user"]
+        }
+    },
+    {
+        "name": "outlook_leer",
+        "description": "Abre y muestra el contenido completo de un email corporativo Outlook por su ID.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "user":       {"type": "string", "description": "Email del usuario propietario del buzón"},
+                "message_id": {"type": "string", "description": "ID del mensaje obtenido de outlook_inbox o outlook_buscar"},
+                "tenant":     {"type": "string", "description": "Tenant (default: reamerica)"}
+            },
+            "required": ["user", "message_id"]
+        }
+    },
+    {
+        "name": "outlook_buscar",
+        "description": "Busca emails en el buzón corporativo Outlook usando keywords. KQL syntax. Ej: 'from:broker@x.com AND subject:cotización'.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "user":   {"type": "string",  "description": "Email del usuario propietario del buzón"},
+                "query":  {"type": "string",  "description": "Query de búsqueda (KQL)"},
+                "tenant": {"type": "string",  "description": "Tenant (default: reamerica)"},
+                "top":    {"type": "integer", "description": "Máximo de resultados (default: 15)"}
+            },
+            "required": ["user", "query"]
+        }
+    },
+    {
+        "name": "outlook_enviar",
+        "description": (
+            "Envía un email desde el buzón corporativo Reamerica (Outlook/Graph API). "
+            "IMPORTANTE: SIEMPRE mostrá al usuario destinatario, asunto y cuerpo antes de enviar. "
+            "Esperá confirmación explícita. NUNCA enviés sin confirmación del owner."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "from_user":  {"type": "string", "description": "Email del remitente (usuario del tenant)"},
+                "to":         {"type": "array",  "items": {"type": "string"}, "description": "Lista de destinatarios"},
+                "subject":    {"type": "string", "description": "Asunto del email"},
+                "body_html":  {"type": "string", "description": "Cuerpo del email en HTML"},
+                "cc":         {"type": "array",  "items": {"type": "string"}, "description": "CC (opcional)"},
+                "tenant":     {"type": "string", "description": "Tenant (default: reamerica)"}
+            },
+            "required": ["from_user", "to", "subject", "body_html"]
+        }
     }
 ]
 
@@ -1830,6 +1977,7 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
     OWNER_ONLY_TOOLS = {
         "gmail_leer", "gmail_enviar", "gmail_ver_email", "gmail_descargar_adjunto",
         "calendar_ver", "calendar_crear",
+        "outlook_inbox", "outlook_leer", "outlook_buscar", "outlook_enviar",
         "github_push", "config_guardar", "config_leer", "config_listar",
         "agent_guardar_secret", "agent_registrar_skill", "agent_log",
     }
@@ -3135,6 +3283,56 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
                         except Exception as e:
                             result = f"Error docker: {e}"
                             log.error(f"vps_docker error: {e}")
+
+                    elif block.name == "outlook_inbox":
+                        try:
+                            result = outlook_inbox(
+                                user=block.input["user"],
+                                tenant=block.input.get("tenant", "reamerica"),
+                                days=block.input.get("days", 7),
+                                top=block.input.get("top", 20),
+                                unread=block.input.get("unread", False),
+                            )
+                        except Exception as e:
+                            result = f"Error outlook_inbox: {e}"
+                            log.error(f"outlook_inbox error: {e}")
+
+                    elif block.name == "outlook_leer":
+                        try:
+                            result = outlook_leer(
+                                user=block.input["user"],
+                                message_id=block.input["message_id"],
+                                tenant=block.input.get("tenant", "reamerica"),
+                            )
+                        except Exception as e:
+                            result = f"Error outlook_leer: {e}"
+                            log.error(f"outlook_leer error: {e}")
+
+                    elif block.name == "outlook_buscar":
+                        try:
+                            result = outlook_buscar(
+                                user=block.input["user"],
+                                query=block.input["query"],
+                                tenant=block.input.get("tenant", "reamerica"),
+                                top=block.input.get("top", 15),
+                            )
+                        except Exception as e:
+                            result = f"Error outlook_buscar: {e}"
+                            log.error(f"outlook_buscar error: {e}")
+
+                    elif block.name == "outlook_enviar":
+                        try:
+                            result = outlook_enviar(
+                                from_user=block.input["from_user"],
+                                to=block.input["to"],
+                                subject=block.input["subject"],
+                                body_html=block.input["body_html"],
+                                tenant=block.input.get("tenant", "reamerica"),
+                                cc=block.input.get("cc"),
+                            )
+                        except Exception as e:
+                            result = f"Error outlook_enviar: {e}"
+                            log.error(f"outlook_enviar error: {e}")
 
                     else:
                         result = "Herramienta no reconocida."
