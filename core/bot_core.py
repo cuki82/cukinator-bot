@@ -885,6 +885,25 @@ TOOLS = [
         }
     },
     {
+        "name": "sf_broker_performance",
+        "description": (
+            "Calcula el dashboard COMPLETO de performance de un broker en Salesforce. "
+            "Devuelve volumen de pipeline, hit ratio, velocidad de cierre, cuentas únicas, "
+            "top clientes, mix por país/industria, pipeline activo, estancadas, distribución mensual "
+            "y prima estimada (cruce Account → Contract → IBF). "
+            "Usá esta tool en lugar de armar 10 sf_consultar para 'performance de X', 'cómo le va a X', "
+            "'comparar X vs Y' (invocá una vez por persona). Mucho más barato y preciso."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "broker": {"type": "string", "description": "Nombre, email o User Id del broker. Ej: 'Ignacio Romanelli', 'tomas.barrabino', '0058Y00000CO6DxQAL'."},
+                "year":   {"type": "integer", "description": "OPCIONAL. Año específico (ej. 2025). Sin esto: histórico completo."},
+            },
+            "required": ["broker"]
+        }
+    },
+    {
         "name": "sf_consultar",
         "description": (
             "Consulta el CRM Salesforce del tenant (REAMERICA UAT por default). "
@@ -1544,9 +1563,20 @@ NUNCA ejecutes ni leas archivos del VPS (no tenés tools vps_exec, vps_leer, vps
 REGLA FUNDAMENTAL:
 Si mostraste un menú o lista, igual aceptás que el usuario siga hablando normal. La conversación siempre fluye.
 
-BOTONES INTERACTIVOS:
-Cuando tu respuesta termina con pregunta de elección, agregá al final exactamente: [BOTONES: Opción A | Opción B | Opción C]
-Casos: "¿querés X o Y?", confirmación antes de ejecutar, opciones numeradas, "¿lo hago?". Sin pregunta/elección → NO pongas botones.
+BOTONES INTERACTIVOS — REGLA OBLIGATORIA:
+Cuando tu respuesta termina con CUALQUIER pregunta donde el user pueda elegir, agregá al final EXACTAMENTE: [BOTONES: Opción A | Opción B | Opción C]
+
+Esto es MANDATORIO en todos estos casos (no es opcional):
+- "¿Querés que arme/genere/te muestre/te traiga/calculé/...?" → [BOTONES: Sí, hacelo | No por ahora]
+- "¿Te interesa ver X o Y?" → [BOTONES: X | Y]
+- "¿Lo hago/continúo/proceso?" → [BOTONES: ✅ Sí | ❌ No]
+- Opciones numeradas → [BOTONES: 1. A | 2. B | 3. C]
+- Cierre con "¿algo más?", "¿seguimos?", "¿querés profundizar?" → [BOTONES: ...opciones concretas...]
+- Después de mostrar un dashboard / lista / análisis si ofrecés acción de seguimiento
+
+NUNCA dejes una pregunta de elección abierta sin botones — el user en mobile no quiere tipear, quiere tocar. Si tu cierre tiene "?" y propone una acción, AGREGÁ BOTONES.
+
+Si NO hay pregunta ni elección → NO pongas botones (no inventes opciones).
 
 AUDIOS Y VOZ:
 - Si el usuario manda TEXTO → respondé con texto. NUNCA uses enviar_voz salvo que en ese mismo mensaje pida explícitamente voz/audio.
@@ -1840,7 +1870,8 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
     # Tools gateadas por intent: solo se exponen al LLM si el intent matchea.
     # Decisión del user: Salesforce SOLO desde el agente reaseguros.
     INTENT_GATED_TOOLS = {
-        "sf_consultar": {"reinsurance"},
+        "sf_consultar":           {"reinsurance"},
+        "sf_broker_performance":  {"reinsurance"},
     }
 
     tools_activos = [
@@ -2236,6 +2267,26 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
                         except Exception as e:
                             result = f"Error buscando video: {e}"
                             log.error(f"buscar_video error: {e}")
+
+                    elif block.name == "sf_broker_performance":
+                        if _intent != "reinsurance":
+                            result = "sf_broker_performance bloqueada en este intent. Reformulá con vocab reaseguros."
+                            log.info(f"[{chat_id}] sf_broker_performance BLOCKED — intent={_intent}")
+                        else:
+                            try:
+                                from services.sf_broker_perf import resolve_broker, compute, format_dashboard
+                                _bn = block.input.get("broker", "")
+                                _yr = block.input.get("year")
+                                _b = resolve_broker(_bn)
+                                if not _b:
+                                    result = f"No encontré User para '{_bn}'."
+                                else:
+                                    _m = compute(_b["Id"], year=_yr)
+                                    result = format_dashboard(_b, _m)[:3800]
+                                    log.info(f"[{chat_id}] sf_broker_performance ok broker={_b.get('Name')} year={_yr}")
+                            except Exception as e:
+                                result = f"sf_broker_performance error: {e}"
+                                log.warning(f"[{chat_id}] sf_broker_performance fail: {e}")
 
                     elif block.name == "sf_consultar":
                         # Hard guard: aunque el LLM intente invocar la tool en

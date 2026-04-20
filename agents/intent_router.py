@@ -190,9 +190,14 @@ MODEL_MAP = {
     ("simple",  "research"):       "claude-haiku-4-5",
     ("medium",  "research"):       "claude-sonnet-4-6",
     ("complex", "research"):       "claude-sonnet-4-6",
-    ("simple",  "reinsurance"):    "claude-sonnet-4-6",
-    ("medium",  "reinsurance"):    "claude-sonnet-4-6",
-    ("complex", "reinsurance"):    "claude-opus-4-5",
+    # Reinsurance: Haiku para queries simples (armar SOQL básico, "cuántos accounts hay").
+    # Sonnet para análisis medio (filtros multi-criterio, comparaciones).
+    # Opus para análisis cross-object profundo / textos largos / interpretaciones.
+    # Las tools sf_consultar y sf_broker_performance encapsulan logica → el LLM
+    # gasta menos razonamiento, Haiku alcanza para la mayoria.
+    ("simple",  "reinsurance"):    "claude-haiku-4-5",
+    ("medium",  "reinsurance"):    "claude-haiku-4-5",
+    ("complex", "reinsurance"):    "claude-sonnet-4-6",
     ("simple",  "astrology"):      "claude-sonnet-4-6",
     ("medium",  "astrology"):      "claude-sonnet-4-6",
     ("complex", "astrology"):      "claude-opus-4-5",  # interpretaciones profundas merecen Opus

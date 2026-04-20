@@ -1348,6 +1348,63 @@ async def handle_sf_callback(update, context):
             pass
 
 
+async def cmd_broker(update, context):
+    """Dashboard de performance de un broker. Owner-only.
+    /broker <nombre|email|userId> [year]
+    Ej: /broker Ignacio Romanelli
+        /broker Ignacio Romanelli 2025
+        /broker ignacio.romanelli@reamerica
+    """
+    from core.bot_core import OWNER_CHAT_ID
+    chat_id = update.effective_chat.id
+    if chat_id != OWNER_CHAT_ID:
+        await update.message.reply_text("Comando solo para el owner.")
+        return
+    args = context.args or []
+    if not args:
+        await update.message.reply_text(
+            "*Uso:* `/broker <nombre|email|userId> [year]`\n\n"
+            "Ejemplos:\n"
+            "• `/broker Ignacio Romanelli` — histórico\n"
+            "• `/broker Ignacio Romanelli 2025` — solo 2025\n"
+            "• `/broker tomas.barrabino` — busca por email\n",
+            parse_mode="Markdown"
+        )
+        return
+    # Parse: si último arg es un año (4 dígitos 2020-2099), separar
+    year = None
+    if args[-1].isdigit() and len(args[-1]) == 4 and 2020 <= int(args[-1]) <= 2099:
+        year = int(args[-1])
+        needle = " ".join(args[:-1])
+    else:
+        needle = " ".join(args)
+
+    await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+    try:
+        from services.sf_broker_perf import resolve_broker, compute, format_dashboard
+        broker = resolve_broker(needle)
+        if not broker:
+            await update.message.reply_text(
+                f"No encontré ningún User para `{needle}`.\n"
+                f"Probá con email completo o User Id (empieza con `005`).",
+                parse_mode="Markdown"
+            )
+            return
+        log.info(f"[{chat_id}] /broker {broker.get('Name')} year={year}")
+        metrics = compute(broker["Id"], year=year)
+        text = format_dashboard(broker, metrics)
+        # Si es muy largo, partir en 2
+        if len(text) > 4000:
+            chunks = [text[i:i+3900] for i in range(0, len(text), 3900)]
+            for ch in chunks:
+                await update.message.reply_text(ch, parse_mode="Markdown")
+        else:
+            await update.message.reply_text(text, parse_mode="Markdown")
+    except Exception as e:
+        log.error(f"[{chat_id}] /broker error: {e}")
+        await update.message.reply_text(f"Error: {str(e)[:300]}")
+
+
 async def cmd_qr(update, context):
     """Genera QR code del texto/URL pasado. /qr <texto o URL>
     Ejemplos:
