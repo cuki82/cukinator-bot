@@ -35,15 +35,14 @@ _PATTERNS = {
         r"\bc[oó]mo est[aá]\s+(?:implementad[ao]|el\s+c[oó]digo|hech[oa]|el\s+handler|la\s+funci[oó]n)",
         r"\bimplement[aá]\s+(?:el\s+|un[ao]?\s+)?(?:feature|funci[oó]n|handler|m[oó]dulo|tool|cambio|fix)",
         r"\bmir[aá]\s+(?:el\s+|la\s+)?(?:c[oó]digo|handler|funci[oó]n|archivo|bot)",
-        # Fallback amplio: si el mensaje menciona el dominio técnico del bot
-        # + cualquier verbo de acción/investigación → coding. Mejor falso positivo
-        # (va al worker Codex+ClaudeCode, que igual puede solo responder si no
-        # hay nada que cambiar) que falso negativo (Haiku que no puede pushear).
-        r"\b(?:revis|analiz|investig|propon|suger|fixe|arregl|mejor|mir|inspeccion|edit|cambi|modific|escrib|reescrib|implement|agreg|refactor|fij|corregi|ajust|pon[ée]r?|meter|sumar|integrar|unificar|combin)\w*\b.*\b(?:c[oó]digo|handler|funci[oó]n|archivo|bot|worker|router|m[oó]dulo|endpoint|prompt|config|schema|logic|voice|audio|rag|kb|sistema|arquitectura|pipeline|feature|trace|token|intent|servicio|men[úu]|submenu|submenú|bot[oó]n|botones|comando|comandos|callback|/\w+)\b",
-        # Composición UX: "poné X dentro/adentro de Y", "agregá X al menú", "integrá A con B".
-        r"\b(?:pon[ée]r?|agrega|integrar?|unificar?|combin\w*|meter?)\b\s+.*\b(?:dentro|adentro|en|al|en el|en la)\b\s*/?\w+",
-        r"\b(?:el|la|los|las)\s+men[úu]\s+de\b",
-        r"/\w+\s+(?:dentro|en|al)\s+/\w+",  # literal "/rma dentro de /menu"
+        # Fallback amplio coding: verbo de acción + OBJETO TÉCNICO ESPECÍFICO del
+        # repo/bot (no objetos genéricos como "menú" o "botón" que pueden ser
+        # de Reamerica/astrología/otra empresa). Los casos ambiguos (menú,
+        # botón, comando sin contexto) se resuelven con LLM fallback, no con
+        # más keywords que hacen over-fitting.
+        r"\b(?:revis|analiz|investig|propon|suger|fixe|arregl|mejor|mir|inspeccion|edit|cambi|modific|escrib|reescrib|implement|agreg|refactor|fij|corregi|ajust|pon[ée]r?|meter|sumar|integrar|unificar|combin)\w*\b.*\b(?:c[oó]digo|handler|funci[oó]n|archivo|bot_core|handlers/|services/|workers/|modules/|agents/|worker|router|m[oó]dulo|endpoint|schema|pipeline|trace|intent_router|message_handler|systemctl|docker|nginx|railway|deploy|commit|push|merge|branch|repo)\b",
+        # "/comando dentro de /otrocomando" → modificación de estructura
+        r"/\w+\s+(?:dentro|en|al)\s+/\w+",
         r"\bpor qu[eé]\s+.*(?:no\s+)?(?:funciona|anda|falla|devuelve|retorna|crashea|rompe)",
         r"\bhacemos?\s+(?:el\s+)?push",
         r"\b(?:qu[eé]\s+)?(?:est[aá]s?|estuvo|estaba)\s+(?:pasando|fallando|rompiendo)\b",
@@ -121,17 +120,76 @@ _PATTERNS = {
 # Orden de prioridad (primero gana)
 _PRIORITY = ["coding", "reinsurance", "astrology", "personal", "research", "conversational"]
 
+# ── Señales de ambigüedad ─────────────────────────────────────────────────────
+# Si el keyword router devuelve 'conversational' PERO detectamos estas señales,
+# escalamos a un LLM Haiku para que clasifique con contexto semántico. Esto
+# evita over-fitting con keywords genéricas (ej. "menú" puede ser del bot,
+# de Reamerica, o de astrología — el regex no discrimina, el LLM sí).
+
+_AMBIGUITY_SIGNALS = [
+    r"/\w+",                          # cualquier slash command mencionado
+    r"\b(?:pon[ée]r?|agrega|meter?|integrar?|unificar?|combin\w*|modific|cambi|edita|borra|elimin|refactor|implement|reescrib)\w*\b",
+    r"\b(?:archivo|handler|comando|menú|menu|submenu|submenú|botón|boton|callback|tool|endpoint|module|módulo|función|funcion|servicio|service)\b",
+    r"\b(?:del bot|del worker|del repo|del código|del codigo|del archivo|del handler|del sistema)\b",
+    r"\bperformance\b", r"\bdashboard\b", r"\bmétric\w+\b", r"\bmetric\w+\b",
+]
+
+def _has_ambiguity(t: str) -> bool:
+    return any(re.search(p, t) for p in _AMBIGUITY_SIGNALS)
+
+
+def _classify_with_llm(text: str) -> str:
+    """Clasifica con Haiku 4.5 cuando el keyword router no alcanza. Zero-shot.
+    ~$0.0005 por call. Fallback a 'conversational' si Claude no responde o falla."""
+    try:
+        import os
+        import anthropic
+        key = os.environ.get("ANTHROPIC_KEY") or os.environ.get("ANTHROPIC_API_KEY", "")
+        if not key:
+            return "conversational"
+        client = anthropic.Anthropic(api_key=key, timeout=10.0)
+        resp = client.messages.create(
+            model="claude-haiku-4-5",
+            max_tokens=20,
+            system=(
+                "Clasificá el mensaje del usuario en UNO de estos intents. Respondé SOLO la palabra, sin puntuación ni explicación:\n"
+                "- coding: pide modificar código/handler/tool/archivo del bot/repo, push/commit, refactor, bug del código.\n"
+                "- reinsurance: pregunta por CRM Salesforce, accounts, oportunidades, primas, brokers, IBF, endosos, Reamerica.\n"
+                "- astrology: carta natal, tránsitos, planetas, signos, retornos, ascendente.\n"
+                "- personal: recordar/guardar preferencias, historial, mis datos, mis contactos del usuario.\n"
+                "- research: buscar/investigar/resumir algo externo, web, noticias, documentación.\n"
+                "- conversational: charla general, saludos, confirmaciones, clima, hora, preguntas que no caen en otra."
+            ),
+            messages=[{"role": "user", "content": text[:800]}],
+        )
+        content = ""
+        for block in resp.content:
+            if hasattr(block, "text"):
+                content += block.text
+        out = content.strip().lower().split()[0] if content.strip() else ""
+        out = out.strip("`'\"., ")
+        valid = {"coding", "reinsurance", "astrology", "personal", "research", "conversational"}
+        if out in valid:
+            log.info(f"llm_classifier: {out!r} for {text[:60]!r}")
+            return out
+        log.warning(f"llm_classifier unexpected output: {content[:60]!r}")
+        return "conversational"
+    except Exception as e:
+        log.debug(f"llm_classifier fail: {e}")
+        return "conversational"
+
+
 # ── Clasificador ───────────────────────────────────────────────────────────────
 
-def classify(text: str) -> str:
-    """
-    Clasifica el intent del mensaje. Zero latencia, zero costo.
-    Retorna uno de: coding, research, reinsurance, astrology, personal, conversational
-    """
+def classify(text: str, use_llm_fallback: bool = True) -> str:
+    """Clasifica el intent. 2 pasadas:
+    1. Keyword regex (zero latencia, zero costo) — cubre la gran mayoría.
+    2. Si regex dio 'conversational' PERO hay señales de ambigüedad, escala a
+       Haiku 4.5 (~$0.0005, ~1s). Esto evita keywords genéricas que pueden
+       aplicar a múltiples dominios (ej. 'menú' = bot/astrología/reamerica)."""
     t = text.lower()
 
     scores = {intent: 0 for intent in _PRIORITY}
-
     for intent, patterns in _PATTERNS.items():
         if intent not in scores:
             continue
@@ -139,9 +197,24 @@ def classify(text: str) -> str:
             if re.search(p, t):
                 scores[intent] += 1
 
-    # El intent con más matches gana (mínimo 1)
     best = max(scores, key=scores.get)
     result = best if scores[best] > 0 else "conversational"
+
+    # Fallback LLM: si hay señales de ambigüedad (verbo + objeto genérico como
+    # "menú/botón/comando" que puede ser del bot O de astrología O de Reamerica),
+    # escalamos a Haiku 4.5 para que decida con contexto semántico — NO importa
+    # si el keyword dijo coding o conversational; queremos la verdad, no la
+    # primera respuesta de regex.
+    # No escalamos: texto corto (<15 chars) o intents específicos confiables
+    # (reinsurance/astrology/personal) con score alto.
+    if (use_llm_fallback
+            and len(text.strip()) >= 15
+            and _has_ambiguity(t)
+            and not (result in ("reinsurance", "astrology", "personal") and scores[result] >= 2)):
+        llm_result = _classify_with_llm(text)
+        if llm_result != result:
+            log.info(f"intent: keyword={result!r} → llm={llm_result!r} for {text[:60]!r}")
+        result = llm_result
 
     log.debug(f"Intent '{result}' para: {text[:60]}")
     return result
