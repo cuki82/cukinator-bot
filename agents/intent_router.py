@@ -39,7 +39,11 @@ _PATTERNS = {
         # + cualquier verbo de acción/investigación → coding. Mejor falso positivo
         # (va al worker Codex+ClaudeCode, que igual puede solo responder si no
         # hay nada que cambiar) que falso negativo (Haiku que no puede pushear).
-        r"\b(?:revis|analiz|investig|propon|suger|fixe|arregl|mejor|mir|inspeccion|edit|cambi|modific|escrib|reescrib|implement|agreg|refactor|fij|corregi|ajust)\w*\b.*\b(?:c[oó]digo|handler|funci[oó]n|archivo|bot|worker|router|m[oó]dulo|endpoint|prompt|config|schema|logic|voice|audio|rag|kb|sistema|arquitectura|pipeline|feature|trace|token|intent|servicio)\b",
+        r"\b(?:revis|analiz|investig|propon|suger|fixe|arregl|mejor|mir|inspeccion|edit|cambi|modific|escrib|reescrib|implement|agreg|refactor|fij|corregi|ajust|pon[ée]r?|meter|sumar|integrar|unificar|combin)\w*\b.*\b(?:c[oó]digo|handler|funci[oó]n|archivo|bot|worker|router|m[oó]dulo|endpoint|prompt|config|schema|logic|voice|audio|rag|kb|sistema|arquitectura|pipeline|feature|trace|token|intent|servicio|men[úu]|submenu|submenú|bot[oó]n|botones|comando|comandos|callback|/\w+)\b",
+        # Composición UX: "poné X dentro/adentro de Y", "agregá X al menú", "integrá A con B".
+        r"\b(?:pon[ée]r?|agrega|integrar?|unificar?|combin\w*|meter?)\b\s+.*\b(?:dentro|adentro|en|al|en el|en la)\b\s*/?\w+",
+        r"\b(?:el|la|los|las)\s+men[úu]\s+de\b",
+        r"/\w+\s+(?:dentro|en|al)\s+/\w+",  # literal "/rma dentro de /menu"
         r"\bpor qu[eé]\s+.*(?:no\s+)?(?:funciona|anda|falla|devuelve|retorna|crashea|rompe)",
         r"\bhacemos?\s+(?:el\s+)?push",
         r"\b(?:qu[eé]\s+)?(?:est[aá]s?|estuvo|estaba)\s+(?:pasando|fallando|rompiendo)\b",

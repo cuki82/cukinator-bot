@@ -3887,17 +3887,22 @@ async def handle_biblioteca_callback(update: Update, context: ContextTypes.DEFAU
         await query.edit_message_text("ASTROLOGIA — cartas guardadas:",
             reply_markup=InlineKeyboardMarkup(_kb_back(botones)))
 
-async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Menú principal con todos los comandos organizados."""
-    teclado = InlineKeyboardMarkup([
+def _menu_main_keyboard():
+    """Teclado principal reusable (cmd_menu + callback menu:main)."""
+    return InlineKeyboardMarkup([
         [InlineKeyboardButton("📧  Gmail",        callback_data="menu:gmail"),
          InlineKeyboardButton("📅  Calendario",   callback_data="menu:calendar")],
         [InlineKeyboardButton("⭐  Astrología",   callback_data="menu:astro"),
          InlineKeyboardButton("🎤  Voz",           callback_data="menu:voz")],
+        [InlineKeyboardButton("🏢  Reamerica",    callback_data="menu:reamerica")],
         [InlineKeyboardButton("📚  Biblioteca",   callback_data="menu:biblioteca")],
         [InlineKeyboardButton("🔧  Sistema",       callback_data="menu:sistema")],
     ])
-    await update.message.reply_text("¿Qué querés hacer?", reply_markup=teclado)
+
+
+async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Menú principal con todos los comandos organizados."""
+    await update.message.reply_text("¿Qué querés hacer?", reply_markup=_menu_main_keyboard())
 
 
 async def handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3909,15 +3914,30 @@ async def handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     BACK = [[InlineKeyboardButton("← Volver al menú", callback_data="menu:main")]]
 
     if data == "menu:main":
+        await query.edit_message_text("¿Qué querés hacer?", reply_markup=_menu_main_keyboard())
+
+    elif data == "menu:reamerica":
+        # Submenu Reamerica — mismas opciones que /rma (callbacks sf:* y rma:*).
         teclado = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📧  Gmail",        callback_data="menu:gmail"),
-             InlineKeyboardButton("📅  Calendario",   callback_data="menu:calendar")],
-            [InlineKeyboardButton("⭐  Astrología",   callback_data="menu:astro"),
-             InlineKeyboardButton("🎤  Voz",           callback_data="menu:voz")],
-            [InlineKeyboardButton("📚  Biblioteca",   callback_data="menu:biblioteca")],
-            [InlineKeyboardButton("🔧  Sistema",       callback_data="menu:sistema")],
+            [InlineKeyboardButton("📊  Resumen general",    callback_data="rma:summary")],
+            [InlineKeyboardButton("👥  Cuentas",            callback_data="sf:accounts"),
+             InlineKeyboardButton("📞  Contactos",          callback_data="sf:contacts")],
+            [InlineKeyboardButton("💼  Oportunidades",      callback_data="sf:opps"),
+             InlineKeyboardButton("📈  Pipeline",           callback_data="sf:pipeline")],
+            [InlineKeyboardButton("📜  Contratos",          callback_data="sf:obj:Contratos__c"),
+             InlineKeyboardButton("📝  Endosos",            callback_data="sf:obj:Endosos__c")],
+            [InlineKeyboardButton("🌎  Por industria",      callback_data="sf:industries"),
+             InlineKeyboardButton("🌍  Por país",            callback_data="sf:countries")],
+            [InlineKeyboardButton("👤  Brokers",            callback_data="rma:brokers")],
+            [InlineKeyboardButton("📂  Listar objetos",     callback_data="sf:list")],
+            [InlineKeyboardButton("⚡  Comandos directos",  callback_data="rma:tools")],
+            *BACK
         ])
-        await query.edit_message_text("¿Qué querés hacer?", reply_markup=teclado)
+        await query.edit_message_text(
+            "🏢 *REAMERICA RISK ADVISORS*\n_CRM + Brokers + Reportes (solo lectura)._",
+            parse_mode="Markdown",
+            reply_markup=teclado
+        )
 
     elif data == "menu:gmail":
         teclado = InlineKeyboardMarkup([
