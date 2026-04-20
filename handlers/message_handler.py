@@ -1600,6 +1600,82 @@ async def cmd_broker(update, context):
         await update.message.reply_text(f"Error: {str(e)[:300]}")
 
 
+async def cmd_top(update, context):
+    """Top 5 usuarios con más mensajes este mes. Owner-only.
+
+    Uso:
+      /top           -> top 5 este mes (default)
+      /top 10        -> top 10 este mes
+      /top all       -> top 5 histórico
+      /top 10 all    -> top 10 histórico
+    """
+    from core.bot_core import OWNER_CHAT_ID, DB_PATH
+    chat_id = update.effective_chat.id
+    if chat_id != OWNER_CHAT_ID:
+        await update.message.reply_text("Solo owner.")
+        return
+
+    args = context.args or []
+    limit = 5
+    all_time = False
+    for a in args:
+        if a.lower() == "all":
+            all_time = True
+        elif a.isdigit() and 1 <= int(a) <= 50:
+            limit = int(a)
+
+    import sqlite3
+    period = "histórico" if all_time else "este mes"
+    where = "role = 'user'" if all_time else "role = 'user' AND timestamp >= date('now', 'start of month')"
+
+    try:
+        con = sqlite3.connect(DB_PATH)
+        cur = con.cursor()
+        cur.execute(f"""
+            SELECT chat_id, COUNT(*) as c, MAX(timestamp) as last_ts
+            FROM messages
+            WHERE {where}
+            GROUP BY chat_id
+            ORDER BY c DESC
+            LIMIT ?
+        """, (limit,))
+        rows = cur.fetchall()
+        # Total msgs para % share
+        cur.execute(f"SELECT COUNT(*) FROM messages WHERE {where}")
+        total = cur.fetchone()[0] or 1
+        con.close()
+    except Exception as e:
+        log.error(f"[{chat_id}] /top error: {e}")
+        await update.message.reply_text(f"Error: {str(e)[:200]}")
+        return
+
+    if not rows:
+        await update.message.reply_text(f"Sin mensajes ({period}).")
+        return
+
+    # Resolver nombres desde person_memory o shared.tenants si hay
+    def _name_for(cid):
+        try:
+            con2 = sqlite3.connect(DB_PATH)
+            r = con2.execute("SELECT name FROM person_memory WHERE chat_id=? LIMIT 1", (cid,)).fetchone()
+            con2.close()
+            if r:
+                return r[0]
+        except Exception:
+            pass
+        return None
+
+    lines = [f"*Top {len(rows)} usuarios — {period}*", f"_Total mensajes user: {total:,}_\n"]
+    for i, (cid, c, last_ts) in enumerate(rows, 1):
+        pct = (c / total) * 100
+        name = _name_for(cid)
+        who = f"*{name}*" if name else f"`{cid}`"
+        last = (last_ts or "")[:16]
+        lines.append(f"{i}. {who} — *{c:,}* msgs ({pct:.1f}%) · último: {last}")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
 async def cmd_version(update, context):
     """Versión del código corriendo en el bot.
     Muestra `git describe --always` (tag/sha), rama actual, y último commit.
