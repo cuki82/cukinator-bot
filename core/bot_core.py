@@ -1592,12 +1592,27 @@ Queries típicas — ejemplos directos para sf_consultar:
 - **Pipeline opps por stage**: `SELECT StageName, COUNT(Id) c, SUM(Amount) tot FROM Opportunity GROUP BY StageName`
 - **Endosos recientes**: `SELECT Id, Name, CreatedDate FROM Endosos__c ORDER BY CreatedDate DESC LIMIT 10`
 
-REGLAS:
+REGLAS Y SHORTCUTS APRENDIDOS (no perder iteraciones redescubriendo):
+
 - Antes de adivinar campos: si la pregunta es ambigua, llamá `sf_consultar` con `object="<sObject>"` para que devuelva el describe (ahorra iteraciones).
-- Si el user pregunta por "prima/premium" → directo a `IBF__c`. NO inventar `Account.Premium__c`.
-- Si el user pregunta por "póliza/contrato" → primero `Contratos__c`, fallback `Endosos__c`.
+- Si el user pregunta por "prima/premium" → directo a `IBF__c.Prima_periodo_100__c` y `Prima_cedida__c`. NO inventar `Account.Premium__c`.
+- Si el user pregunta por "póliza/contrato" → primero `Contratos__c` (vacío en UAT), fallback `Endosos__c`.
 - Si el user pregunta por "factura/cobro" → `IBF__c` o `Cobro_a_Proveedores__c`.
-- Mostrar montos formateados (`${X:,.0f}`), no en notación científica."""
+- Mostrar montos formateados (`${X:,.0f}`), no en notación científica.
+
+INTERMEDIARIO / BROKER / VENDEDOR:
+- En `Opportunity`, el intermediario es `OwnerId` (label "Broker"). También hay `Broker_actual__c` (custom, también es User).
+- Para buscar negocios de "X persona": primero `SELECT Id, Name FROM User WHERE Name LIKE '%X%' OR Email LIKE '%X%'`, después usar ese Id en `OwnerId = '...'`.
+- "Concretado" / "ganado" / "cerrado positivo" → `IsClosed = true AND IsWon = true`. En Reamerica equivale aproximadamente al stage `'Orden en firme'`.
+- "Bajado" / "perdido" → stages `'Baja (no se cotizó)'`, `'No Materializado (NM)'`. `IsClosed=true AND IsWon=false`.
+- "En curso" / "abierto" → `IsClosed = false`. Stages típicos: `'SCTV (con subjetividades)'`, `'SCTC (sujeto a información adicional)'`, `'Aguardando informacion de cliente'`, `'Respuesta Prov. recibida'`.
+
+LIMITACIONES SCHEMA UAT (datos sandbox):
+- `Opportunity.Amount` está en $0 para todo el set (no migraron montos a UAT). NO reportar "$0 millones" como si fuera real — aclarar que es sandbox.
+- Datos históricos terminan ~2025-07 en muchos objetos. Filtros `CALENDAR_YEAR(...) = 2026` van a devolver 0 frecuentemente. Si el user pide "este año" y no hay data, decirlo y ofrecer mostrar el último año con data.
+- `IBF__c` NO tiene relación directa a `Opportunity` ni a `Owner`/`Broker`. Sus refs son `Contrato__c` → `Contract` (standard), `IBF_Relacionado__c` → IBF (jerarquía), `Informacion_Quickbooks__c`. Para cruzar prima ↔ broker, hay que ir: Opportunity → AccountId → buscar Contracts del Account → IBFs de esos Contracts. Es 3 saltos — si la pregunta es de prima por broker, advertir que la query es compleja y mostrar primero un análisis.
+- `Contratos__c` (custom) está VACÍO en UAT (0 reg). El "Contrato" real es el sObject standard `Contract`.
+- Custom objects con muchos registros: `IBF__c` (829), `IBF_Wrapper__c` (981), `Endosos__c` (25). Los SDOC__* son del módulo S-Docs (generación documental), no son data del negocio."""
 
 _SYS_GMAIL_CALENDAR = """GMAIL:
 - Mostrar emails: remitente, asunto, fecha, 1 línea de resumen. Nada más.
@@ -1846,7 +1861,7 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
     # describe + query). Si el intent es reinsurance, damos margen para 3-4 ciclos
     # de explore→describe→query→render. Sino el LLM se queda sin tools en el medio.
     if _intent_pre == "reinsurance":
-        max_iterations = 10
+        max_iterations = 14  # SF queries con joins / cross-object pueden necesitar 4-6 calls
     elif is_dev_task:
         max_iterations = 12
     else:
