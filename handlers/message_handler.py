@@ -844,21 +844,27 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Maneja documentos enviados al bot (PDF, TXT, etc.)"""
-    import tempfile, os
+    """Maneja documentos enviados al bot (PDF, TXT, etc.).
+
+    Nuevo flow (multi-tenant):
+      1. Extrae texto del documento.
+      2. NO ingesta automáticamente — muestra botones preguntando a qué
+         tenant/namespace subir (Reamerica / Goodsten / Personal / Analizar
+         sin ingestar / Cancelar).
+      3. Al click, ingesta al schema correcto via modules.rag_kb.
+    """
+    import tempfile, os, secrets
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
     chat_id = update.effective_chat.id
-    name = update.effective_user.first_name or "Usuario"
     doc = update.message.document
 
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
-    # Solo PDF y texto por ahora
     if doc.mime_type not in ("application/pdf", "text/plain"):
         await update.message.reply_text(f"Por ahora solo proceso PDF y TXT. Recibí: {doc.mime_type}")
         return
 
     try:
-        # Descargar archivo
         tg_file = await context.bot.get_file(doc.file_id)
         suffix = ".pdf" if doc.mime_type == "application/pdf" else ".txt"
         with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
@@ -866,7 +872,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await tg_file.download_to_drive(tmp_path)
         log.info(f"[{chat_id}] Documento recibido: {doc.file_name} ({doc.file_size} bytes)")
 
-        # Extraer texto
         texto = ""
         if doc.mime_type == "application/pdf":
             try:
@@ -880,7 +885,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     import pdfminer.high_level as pdfminer
                     texto = pdfminer.extract_text(tmp_path)
                 except ImportError:
-                    await update.message.reply_text("Necesito instalar pypdf para leer PDFs. Avisale al admin.")
+                    await update.message.reply_text("Necesito pypdf instalado para leer PDFs.")
                     return
         else:
             with open(tmp_path, "r", errors="replace") as f:
@@ -889,65 +894,177 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         os.unlink(tmp_path)
 
         if not texto.strip():
-            await update.message.reply_text("No pude extraer texto del documento. ¿Es un PDF escaneado (imagen)?")
+            await update.message.reply_text("No pude extraer texto. ¿Es un PDF escaneado (imagen)?")
             return
 
-        # Truncar si es muy largo
-        texto_truncado = texto[:12000]
-        truncado = len(texto) > 12000
-
-        # Pasar a Claude con contexto
+        # Guardar en cache de usuario con token corto (callback_data tiene 64b límite)
+        token = secrets.token_urlsafe(6)
         caption = update.message.caption or ""
-        prompt = f"El usuario envió el documento '{doc.file_name}'"
-        if caption:
-            prompt += f" con el mensaje: '{caption}'"
-        prompt += f".\n\nContenido del documento ({len(texto)} caracteres"
-        if truncado:
-            prompt += ", truncado a 12000"
-        prompt += f"):\n\n{texto_truncado}"
+        if not hasattr(context, "user_data") or context.user_data is None:
+            context.user_data = {}
+        context.user_data.setdefault("pending_ingest", {})[token] = {
+            "filename": doc.file_name,
+            "text":     texto,
+            "caption":  caption,
+            "chat_id":  chat_id,
+        }
 
-        await update.message.reply_text(f"Documento recibido: {doc.file_name} ({len(texto)} caracteres). Procesando...")
-        await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+        # Sugerencia de tenant basada en filename/caption
+        suggestion = _suggest_tenant_from_doc(doc.file_name, caption)
 
-        import queue, threading
-        from core.bot_core import ask_claude, save_message_full, send_long_message, DB_PATH
+        def _b(emoji, name, tenant_ns, suggest_slug):
+            star = " ⭐" if suggest_slug and tenant_ns.split(":")[0] == suggest_slug else ""
+            return InlineKeyboardButton(f"{emoji} {name}{star}", callback_data=f"ing:{token}:{tenant_ns}")
 
-        q = queue.Queue()
-        def run_claude():
-            try:
-                q.put(("ok", ask_claude(chat_id, prompt, user_name=name)))
-            except Exception as e:
-                q.put(("err", str(e)))
+        kb = [
+            [_b("🏢", "Reamerica · brand",   "reamerica:brand",   suggestion),
+             _b("🍦", "Goodsten · brand",    "goodsten:brand",    suggestion)],
+            [_b("🍦", "Goodsten · marketing","goodsten:marketing", suggestion),
+             _b("🍦", "Goodsten · producto", "goodsten:producto",  suggestion)],
+            [_b("🏢", "Reamerica · reinsurance", "reamerica:reinsurance", suggestion)],
+            [_b("🔒", "Personal · general",  "personal:general",   suggestion)],
+            [InlineKeyboardButton("📝 Analizar sin ingestar",  callback_data=f"ing:{token}:_analyze_"),
+             InlineKeyboardButton("❌ Cancelar",                callback_data=f"ing:{token}:_cancel_")],
+        ]
 
-        t = threading.Thread(target=run_claude, daemon=True)
-        t.start()
+        msg = (
+            f"📄 *{doc.file_name}*\n"
+            f"_{len(texto):,} caracteres · {doc.file_size/1024:.0f} KB_\n\n"
+            "¿A qué tenant/namespace lo ingesto?"
+        )
+        if suggestion:
+            msg += f"\n\n💡 Sugerido: *{suggestion}* (por nombre/caption)"
+        msg += "\n_La ⭐ marca el sugerido. Si elegís 'Analizar', te devuelvo un resumen sin guardar en la KB._"
 
-        elapsed = 0
-        while t.is_alive() and elapsed < 180:
-            await asyncio.sleep(4)
-            elapsed += 4
-            try:
-                await context.bot.send_chat_action(chat_id=chat_id, action="typing")
-            except Exception:
-                pass
-
-        t.join(timeout=1)
-        if t.is_alive():
-            await update.message.reply_text("Tardó demasiado procesando el documento.")
-            return
-
-        status, payload = q.get(timeout=2)
-        if status == "err":
-            raise Exception(payload)
-
-        reply, _, extra_files = payload
-        save_message_full(chat_id, "user", prompt[:500], db_path=DB_PATH)
-        save_message_full(chat_id, "assistant", reply, db_path=DB_PATH)
-        await send_long_message(context.bot, chat_id, reply, reply_to=update.message)
+        await update.message.reply_text(msg, parse_mode="Markdown",
+                                         reply_markup=InlineKeyboardMarkup(kb))
 
     except Exception as e:
         log.error(f"Error procesando documento: {e}")
         await update.message.reply_text(f"Error procesando el documento: {e}")
+
+
+def _suggest_tenant_from_doc(filename: str, caption: str) -> str:
+    """Sugiere tenant basado en nombre de archivo y caption. '' si no detecta."""
+    blob = f"{filename or ''} {caption or ''}".lower()
+    if any(k in blob for k in ["goodsten", "helado", "helados", "sabor", "gelato"]):
+        return "goodsten"
+    if any(k in blob for k in ["reamerica", "reaseguro", "reinsurance", "broker",
+                                "endoso", "ibf", "cedente", "quota share", "treaty"]):
+        return "reamerica"
+    if any(k in blob for k in ["astrolog", "carta natal", "transito", "retorno solar"]):
+        return "personal"
+    return ""
+
+
+async def handle_ingest_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Callback para los botones de ingesta post-documento."""
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    query = update.callback_query
+    await query.answer()
+    chat_id = query.message.chat.id
+    parts = query.data.split(":", 2)  # "ing:<token>:<tenant_ns>"
+    if len(parts) < 3:
+        await query.edit_message_text("Callback inválido.")
+        return
+    token = parts[1]
+    dest = parts[2]  # "reamerica:brand" | "_analyze_" | "_cancel_"
+
+    cache = (context.user_data or {}).get("pending_ingest", {})
+    data = cache.pop(token, None)
+    if not data:
+        await query.edit_message_text("⏰ Expiró el pedido (o ya fue procesado).")
+        return
+
+    filename = data["filename"]
+    texto    = data["text"]
+    caption  = data.get("caption", "")
+
+    if dest == "_cancel_":
+        await query.edit_message_text(f"❌ Cancelado. `{filename}` no se ingestó.",
+                                       parse_mode="Markdown")
+        return
+
+    if dest == "_analyze_":
+        # Comportamiento anterior: pasar a Claude para análisis
+        await query.edit_message_text(f"📝 Analizando `{filename}` con Claude...",
+                                       parse_mode="Markdown")
+        from core.bot_core import ask_claude, save_message_full, DB_PATH
+        import asyncio, queue, threading
+        prompt = (f"El usuario envió el documento '{filename}'"
+                  + (f" con mensaje: '{caption}'" if caption else "")
+                  + f".\n\nContenido ({len(texto)} chars, truncado si >12k):\n\n{texto[:12000]}")
+        q = queue.Queue()
+        def run_claude():
+            try:
+                q.put(("ok", ask_claude(chat_id, prompt, user_name="User")))
+            except Exception as e:
+                q.put(("err", str(e)))
+        t = threading.Thread(target=run_claude, daemon=True)
+        t.start()
+        elapsed = 0
+        while t.is_alive() and elapsed < 120:
+            await asyncio.sleep(4)
+            elapsed += 4
+        t.join(timeout=1)
+        try:
+            status, payload = q.get(timeout=2)
+            if status == "ok":
+                reply, _, _ = payload
+                save_message_full(chat_id, "user",      prompt[:500], db_path=DB_PATH)
+                save_message_full(chat_id, "assistant", reply,         db_path=DB_PATH)
+                await context.bot.send_message(chat_id=chat_id, text=reply[:4000])
+            else:
+                await context.bot.send_message(chat_id=chat_id, text=f"Error analizando: {payload}")
+        except Exception:
+            pass
+        return
+
+    # Ingesta real: dest tiene formato "tenant:namespace"
+    try:
+        tenant_slug, namespace = dest.split(":", 1)
+    except ValueError:
+        await query.edit_message_text(f"Destino inválido: {dest}")
+        return
+
+    try:
+        from modules.rag_kb import ingest as rag_ingest
+        await query.edit_message_text(
+            f"⏳ Ingestando `{filename}` en *{tenant_slug}* (ns=`{namespace}`)...",
+            parse_mode="Markdown"
+        )
+        metadata = {
+            "source_file": filename,
+            "uploaded_by_chat_id": chat_id,
+            "caption":    caption[:500] if caption else "",
+            "ingested_via": "telegram_document_callback",
+        }
+        # Schema mapping: personal usa schema 'personal' (cross-tenant owner data)
+        # los demás van al schema del tenant slug
+        schema = "personal" if tenant_slug == "personal" else None
+        n_chunks = rag_ingest(
+            source=filename,
+            text=texto,
+            metadata=metadata,
+            namespace=namespace,
+            tenant=tenant_slug if tenant_slug != "personal" else None,
+            schema=schema,
+            semantic=True,
+        )
+        emoji = {"reamerica": "🏢", "goodsten": "🍦", "personal": "🔒"}.get(tenant_slug, "📁")
+        await query.edit_message_text(
+            f"✅ Ingestado en {emoji} *{tenant_slug}* · `ns={namespace}`\n\n"
+            f"📄 `{filename}`\n"
+            f"📊 *{n_chunks}* chunks indexados\n"
+            f"📏 {len(texto):,} caracteres procesados",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        log.error(f"[{chat_id}] ingest callback error: {e}")
+        await query.edit_message_text(
+            f"❌ Error ingestando en {tenant_slug}:\n`{str(e)[:300]}`",
+            parse_mode="Markdown"
+        )
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
