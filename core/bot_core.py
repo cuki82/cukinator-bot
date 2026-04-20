@@ -2238,41 +2238,49 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
                             log.error(f"buscar_video error: {e}")
 
                     elif block.name == "sf_consultar":
-                        try:
-                            from services.salesforce import (
-                                sf_query as _sfq, sf_describe as _sfd, is_select_only as _sfok
-                            )
-                            from services.tenants import resolve_tenant as _rt_sf
-                            _tslug = _rt_sf(chat_id) or "reamerica"
-                            _env = (block.input.get("env") or "uat").lower()
-                            _soql = block.input.get("soql") or ""
-                            _obj  = block.input.get("object") or ""
-                            if _soql:
-                                if not _sfok(_soql):
-                                    result = "sf_consultar: solo se aceptan SELECT desde el LLM. Para INSERT/UPDATE/DELETE usá /sf desde el owner."
-                                else:
-                                    rows = _sfq(_soql, tenant=_tslug, env=_env, max_records=50)
-                                    if not rows:
-                                        result = f"SOQL ejecutado (sin resultados): {_soql}"
+                        # Hard guard: aunque el LLM intente invocar la tool en
+                        # un intent que no sea reinsurance (por cache stale o
+                        # tool_use residual del history), bloqueamos acá.
+                        if _intent != "reinsurance":
+                            result = ("sf_consultar bloqueada en este intent. Reformulá con palabras "
+                                      "como 'salesforce', 'CRM', 'accounts', 'opportunities', 'prima', "
+                                      "'IBF', 'broker', 'cotizado' o similar para que el router rutee a reaseguros.")
+                            log.info(f"[{chat_id}] sf_consultar BLOCKED — intent={_intent}")
+                        else:
+                            try:
+                                from services.salesforce import (
+                                    sf_query as _sfq, sf_describe as _sfd, is_select_only as _sfok
+                                )
+                                from services.tenants import resolve_tenant as _rt_sf
+                                _tslug = _rt_sf(chat_id) or "reamerica"
+                                _env = (block.input.get("env") or "uat").lower()
+                                _soql = block.input.get("soql") or ""
+                                _obj  = block.input.get("object") or ""
+                                if _soql:
+                                    if not _sfok(_soql):
+                                        result = "sf_consultar: solo se aceptan SELECT. Para INSERT/UPDATE/DELETE usá /sf owner."
                                     else:
-                                        # Compactar resultado para el LLM (sin attributes Salesforce-internos)
-                                        clean = []
-                                        for r in rows[:30]:
-                                            clean.append({k: v for k, v in r.items() if k != "attributes"})
-                                        result = f"{len(rows)} registros (mostrando hasta 30):\n{json.dumps(clean, indent=1, ensure_ascii=False, default=str)[:3500]}"
-                            elif _obj:
-                                d = _sfd(_obj, tenant=_tslug, env=_env)
-                                fields = d.get("fields", [])[:80]
-                                fcompact = [{"name": f["name"], "type": f.get("type"),
-                                             "label": f.get("label"),
-                                             "custom": f.get("custom", False)} for f in fields]
-                                result = f"sObject {_obj} — {len(fields)} campos (primeros 80):\n{json.dumps(fcompact, indent=1, ensure_ascii=False)[:3500]}"
-                            else:
-                                result = "sf_consultar: pasá 'soql' (query) o 'object' (describe)."
-                            log.info(f"[{chat_id}] sf_consultar tenant={_tslug} env={_env} {'soql' if _soql else 'describe'}")
-                        except Exception as e:
-                            result = f"sf_consultar error: {e}"
-                            log.warning(f"[{chat_id}] sf_consultar fail: {e}")
+                                        rows = _sfq(_soql, tenant=_tslug, env=_env, max_records=50)
+                                        if not rows:
+                                            result = f"SOQL ejecutado (sin resultados): {_soql}"
+                                        else:
+                                            clean = []
+                                            for r in rows[:30]:
+                                                clean.append({k: v for k, v in r.items() if k != "attributes"})
+                                            result = f"{len(rows)} registros (mostrando hasta 30):\n{json.dumps(clean, indent=1, ensure_ascii=False, default=str)[:3500]}"
+                                elif _obj:
+                                    d = _sfd(_obj, tenant=_tslug, env=_env)
+                                    fields = d.get("fields", [])[:80]
+                                    fcompact = [{"name": f["name"], "type": f.get("type"),
+                                                 "label": f.get("label"),
+                                                 "custom": f.get("custom", False)} for f in fields]
+                                    result = f"sObject {_obj} — {len(fields)} campos (primeros 80):\n{json.dumps(fcompact, indent=1, ensure_ascii=False)[:3500]}"
+                                else:
+                                    result = "sf_consultar: pasá 'soql' (query) o 'object' (describe)."
+                                log.info(f"[{chat_id}] sf_consultar tenant={_tslug} env={_env} {'soql' if _soql else 'describe'}")
+                            except Exception as e:
+                                result = f"sf_consultar error: {e}"
+                                log.warning(f"[{chat_id}] sf_consultar fail: {e}")
 
                     elif block.name == "image_gen":
                         try:

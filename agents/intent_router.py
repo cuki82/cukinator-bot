@@ -86,6 +86,20 @@ _PATTERNS = {
         r"\breasegurador(es)?\b", r"\bbroker(s)?\b",
         r"\bprima\s+(?:emitida|cedida|total|del?\s+ano|por\s+mes)\b",
         r"\bcontrato(s)?\s+de\s+reaseguro\b",
+        # Vocabulario comercial Reamerica — el user usa estos terminos para hablar de SF
+        r"\bnegocio(s)?\b", r"\bconcretad[oa]s?\b", r"\bganad[oa]s?\b",
+        r"\bcerrad[oa]s?\b(?!\s+(?:la|el)\s+(?:bot|sesion|chat))",  # cerrado pero no del bot
+        r"\bcotizad[oa]s?\b", r"\bcotizaci[oó]n(es)?\b",
+        r"\bcolocad[oa]s?\b", r"\bcolocaci[oó]n(es)?\b",
+        r"\bcomisi[oó]n(es)?\b", r"\bcomisionad[oa]s?\b",
+        r"\bintermedi(?:o|aci[oó]n|ad[oa]s?)\b",
+        r"\bmaterializad[oa]s?\b", r"\bbajad[oa]s?\b",
+        r"\bemitid[oa]s?\b",  # prima emitida, polizas emitidas
+        r"\bcedid[oa]s?\b",   # prima cedida
+        r"\bvigent(?:e|es)\b", r"\bvencid[oa]s?\b",
+        # Personas conocidas Reamerica → asumir contexto SF
+        r"\bromanelli\b", r"\bignacio\b\s+\w+", r"\bcarlos\s+(?:martin\s+)?romanelli\b",
+        r"\bmartin\s+romanelli\b",
     ],
     "astrology": [
         r"astro", r"carta natal", r"tr[aá]nsito", r"planeta", r"signo",
