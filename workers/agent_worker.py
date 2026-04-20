@@ -149,6 +149,7 @@ def _run_claude_cli_streaming(prompt: str, chat_id: int, task_id: str) -> dict:
     raw_lines: list = []
     errors: list = []
     last_edit = 0.0
+    latest_thought = "_iniciando..._"
     EDIT_THROTTLE = 1.5  # segundos entre edits para no pegar rate limit
 
     try:
@@ -190,12 +191,21 @@ def _run_claude_cli_streaming(prompt: str, chat_id: int, task_id: str) -> dict:
                         steps.append(_format_tool_line(nm, block.get("input") or {}))
                         now = time.time()
                         if now - last_edit > EDIT_THROTTLE:
-                            _tg_edit(chat_id, msg_id, _compose_progress(title, steps, "_en progreso..._"))
+                            _tg_edit(chat_id, msg_id, _compose_progress(title, steps, f"_{latest_thought}_"))
                             last_edit = now
                     elif btype == "text":
                         txt = (block.get("text") or "").strip()
                         if txt:
                             final_text = txt
+                            # Mostrar lo que Claude está "diciendo" ahora como footer
+                            short = txt[:120].replace("\n", " ")
+                            if len(txt) > 120:
+                                short += "…"
+                            latest_thought = short
+                            now = time.time()
+                            if now - last_edit > EDIT_THROTTLE:
+                                _tg_edit(chat_id, msg_id, _compose_progress(title, steps, f"_{latest_thought}_"))
+                                last_edit = now
             elif etype == "result":
                 rt = evt.get("result") or evt.get("content") or ""
                 if rt:
@@ -389,18 +399,21 @@ def codex_plan(user_text: str) -> str:
 
 def codex_summarize(user_text: str, raw_summary: str, modified_files: list, git_info: dict) -> str:
     """gpt-5-codex formatea el resultado de Claude Code para mandarlo a Telegram."""
-    context = f"Pedido: {user_text}\n\nResultado técnico: {raw_summary}\n"
+    context = f"Pedido original del usuario: {user_text}\n\nResultado técnico del agente: {raw_summary}\n"
     if modified_files:
-        context += f"Archivos modificados: {modified_files}\n"
+        context += f"Archivos tocados: {', '.join(modified_files)}\n"
     if git_info.get("commit"):
-        context += f"Git: {git_info['commit']}\n"
+        context += f"Commit: {git_info['commit']}\n"
     system = (
-        "Sos un formateador de respuestas técnicas para Telegram (rioplatense). Recibís "
-        "el pedido original + resultado técnico de un agente. Generá una respuesta clara, "
-        "concisa, con markdown básico (bullets, bold). Máximo 1500 caracteres. Sin preámbulos. "
-        "Arrancá directo con lo relevante."
+        "Sos un asistente técnico que le explica a un usuario no-developer qué hizo un agente de código. "
+        "Usá lenguaje claro, rioplatense, sin jerga técnica innecesaria. Markdown básico para Telegram. "
+        "SIEMPRE incluí estas tres secciones (omití las que no apliquen, pero si aplican no las saltes):\n"
+        "✅ *Qué se hizo* — explicá qué cambios concretos se implementaron, en criollo\n"
+        "⏳ *Qué falta* — si quedó algo pendiente del lado del agente, listalo\n"
+        "🙋 *Qué necesito de vos* — si hay decisiones o info que el agente necesita del usuario para continuar\n"
+        "Máximo 1500 caracteres. Sin preámbulos. Arrancá directo con la primera sección."
     )
-    out = _openai_responses(system, context, max_tokens=600)
+    out = _openai_responses(system, context, max_tokens=700)
     return out or raw_summary
 
 
@@ -446,6 +459,10 @@ def run_agent(task):
 
     log.info(f"[{task.task_id}] codex_summarize...")
     final_summary = codex_summarize(task.user_text, raw_output or "(sin output)", modified_files, git_info)
+
+    # Mandar el resumen final como mensaje nuevo (no edit), para que quede
+    # separado del bloque de progreso y sea fácil de leer.
+    _tg_send(task.chat_id, final_summary)
 
     return WorkerResult(
         task_id=task.task_id,
