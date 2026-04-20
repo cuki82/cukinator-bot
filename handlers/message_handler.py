@@ -1046,26 +1046,15 @@ async def cmd_sf(update, context):
         return
     args = context.args or []
     if not args:
-        kb = [
-            [InlineKeyboardButton("📊 Resumen general",      callback_data="sf:summary")],
-            [InlineKeyboardButton("👥 Cuentas (Accounts)",   callback_data="sf:accounts"),
-             InlineKeyboardButton("📞 Contactos",            callback_data="sf:contacts")],
-            [InlineKeyboardButton("💼 Oportunidades",        callback_data="sf:opps"),
-             InlineKeyboardButton("📈 Pipeline por stage",   callback_data="sf:pipeline")],
-            [InlineKeyboardButton("📜 Contratos__c",         callback_data="sf:obj:Contratos__c"),
-             InlineKeyboardButton("📝 Endosos__c",           callback_data="sf:obj:Endosos__c")],
-            [InlineKeyboardButton("👤 Terceros__c",          callback_data="sf:obj:Tercero__c"),
-             InlineKeyboardButton("📄 Cláusulas",            callback_data="sf:obj:Textos_y_Clausulas__c")],
-            [InlineKeyboardButton("🌎 Por industria",         callback_data="sf:industries"),
-             InlineKeyboardButton("🌍 Por país",              callback_data="sf:countries")],
-            [InlineKeyboardButton("🗂 Listar todos los objetos", callback_data="sf:list")],
-            [InlineKeyboardButton("❓ Cómo usar /sf manual",  callback_data="sf:help")],
-        ]
+        # Recomendar /rma como hub principal — /sf queda como atajo CRM puro.
         await update.message.reply_text(
-            "*Salesforce CRM — Reamerica UAT*\n"
-            "_Solo lectura. Elegí una opción o tipeá una pregunta natural._",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(kb)
+            "ℹ️ Para una experiencia completa usá `/rma` (hub Reamerica).\n\n"
+            "`/sf` directo:\n"
+            "• `/sf <pregunta natural>` — el LLM arma la query\n"
+            "• `/sf SELECT ... FROM ...` — SOQL crudo\n"
+            "• `/sf describe Account` — campos del sObject\n"
+            "• `/sf list` — todos los sObjects",
+            parse_mode="Markdown"
         )
         return
 
@@ -1165,7 +1154,8 @@ async def cmd_sf(update, context):
 
 
 async def handle_sf_callback(update, context):
-    """Callbacks del menú /sf. Cada botón ejecuta una query de solo lectura."""
+    """Callbacks del menú /sf. Cada botón ejecuta una query de solo lectura.
+    Cada vista incluye [← Volver al hub] para navegar al menú /rma."""
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
     query = update.callback_query
     await query.answer()
@@ -1174,6 +1164,9 @@ async def handle_sf_callback(update, context):
     parts = data.split(":", 2)
     action = parts[1] if len(parts) > 1 else ""
     extra  = parts[2] if len(parts) > 2 else ""
+
+    # Botón estándar de retorno al hub /rma
+    _back_kb = InlineKeyboardMarkup([[InlineKeyboardButton("← Volver al hub", callback_data="rma:back")]])
 
     try:
         from services.salesforce import sf_query, sf_describe, sf_list_objects
@@ -1193,7 +1186,7 @@ async def handle_sf_callback(update, context):
                 "• \"contratos creados este mes\"\n\n"
                 "_Solo lectura. INSERT/UPDATE/DELETE bloqueados._"
             )
-            await query.edit_message_text(txt, parse_mode="Markdown")
+            await query.edit_message_text(txt, parse_mode="Markdown", reply_markup=_back_kb)
             return
 
         if action == "summary":
@@ -1212,7 +1205,7 @@ async def handle_sf_callback(update, context):
                 f"📝 Endosos\\_\\_c: *{te:,}*\n"
                 f"👤 Tercero\\_\\_c: *{tt:,}*\n"
             )
-            await query.edit_message_text(txt, parse_mode="Markdown")
+            await query.edit_message_text(txt, parse_mode="Markdown", reply_markup=_back_kb)
             return
 
         if action == "accounts":
@@ -1227,7 +1220,7 @@ async def handle_sf_callback(update, context):
                 tp = (r.get("Type") or "—")[:12]
                 pais = (r.get("BillingCountry") or "—")[:12]
                 lines.append(f"• *{nm}* — {ind} · {tp} · {pais}")
-            await query.edit_message_text("\n".join(lines)[:4000], parse_mode="Markdown")
+            await query.edit_message_text("\n".join(lines)[:4000], parse_mode="Markdown", reply_markup=_back_kb)
             return
 
         if action == "contacts":
@@ -1242,7 +1235,7 @@ async def handle_sf_callback(update, context):
                 email = (r.get("Email") or "—")[:30]
                 acct = ((r.get("Account") or {}).get("Name") or "—")[:20]
                 lines.append(f"• *{nm}* — {title}\n  📧 `{email}`\n  🏢 {acct}")
-            await query.edit_message_text("\n".join(lines)[:4000], parse_mode="Markdown")
+            await query.edit_message_text("\n".join(lines)[:4000], parse_mode="Markdown", reply_markup=_back_kb)
             return
 
         if action == "opps":
@@ -1258,7 +1251,7 @@ async def handle_sf_callback(update, context):
                 close = r.get("CloseDate") or "—"
                 acct = ((r.get("Account") or {}).get("Name") or "—")[:20]
                 lines.append(f"• *{nm}*\n  {stage} · ${amt} · cierre {close}\n  🏢 {acct}")
-            await query.edit_message_text("\n".join(lines)[:4000], parse_mode="Markdown")
+            await query.edit_message_text("\n".join(lines)[:4000], parse_mode="Markdown", reply_markup=_back_kb)
             return
 
         if action == "pipeline":
@@ -1275,7 +1268,7 @@ async def handle_sf_callback(update, context):
                 tot += c
                 lines.append(f"• *{stage}* — {c} opps · ${amt:,}")
             lines.append(f"\n*Total:* {tot} opportunities")
-            await query.edit_message_text("\n".join(lines)[:4000], parse_mode="Markdown")
+            await query.edit_message_text("\n".join(lines)[:4000], parse_mode="Markdown", reply_markup=_back_kb)
             return
 
         if action == "industries":
@@ -1288,7 +1281,7 @@ async def handle_sf_callback(update, context):
                 ind = (r.get("Industry") or "(sin industria)")[:50]
                 c = r.get("c") or 0
                 lines.append(f"• {ind} — *{c}*")
-            await query.edit_message_text("\n".join(lines), parse_mode="Markdown")
+            await query.edit_message_text("\n".join(lines), parse_mode="Markdown", reply_markup=_back_kb)
             return
 
         if action == "countries":
@@ -1304,7 +1297,7 @@ async def handle_sf_callback(update, context):
                 lines.append(f"• {pais} — *{c}*")
             if len(lines) == 1:
                 lines.append("_(no hay BillingCountry cargado en UAT)_")
-            await query.edit_message_text("\n".join(lines), parse_mode="Markdown")
+            await query.edit_message_text("\n".join(lines), parse_mode="Markdown", reply_markup=_back_kb)
             return
 
         if action == "list":
@@ -1320,7 +1313,7 @@ async def handle_sf_callback(update, context):
             lines.append(f"\n*Standard ({len(stds)} totales, top 30):*")
             for o in stds[:30]:
                 lines.append(f"`{o['name']}` — {o['label']}")
-            await query.edit_message_text("\n".join(lines)[:4000], parse_mode="Markdown")
+            await query.edit_message_text("\n".join(lines)[:4000], parse_mode="Markdown", reply_markup=_back_kb)
             return
 
         if action == "obj" and extra:
@@ -1336,12 +1329,214 @@ async def handle_sf_callback(update, context):
             for f in fields[:40]:
                 tag = " 🔧" if f.get("custom") else ""
                 lines.append(f"`{f['name']}` ({f.get('type')}){tag} — {f.get('label','')[:40]}")
-            await query.edit_message_text("\n".join(lines)[:4000], parse_mode="Markdown")
+            await query.edit_message_text("\n".join(lines)[:4000], parse_mode="Markdown", reply_markup=_back_kb)
             return
 
-        await query.edit_message_text(f"Acción `{action}` no reconocida.", parse_mode="Markdown")
+        await query.edit_message_text(f"Acción `{action}` no reconocida.", parse_mode="Markdown", reply_markup=_back_kb)
     except Exception as e:
         log.error(f"[{chat_id}] sf callback error: {e}")
+        try:
+            await query.edit_message_text(f"Error: {str(e)[:300]}")
+        except Exception:
+            pass
+
+
+async def cmd_rma(update, context):
+    """Hub principal de Reamerica Risk Advisors. Owner-only."""
+    from core.bot_core import OWNER_CHAT_ID
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    chat_id = update.effective_chat.id
+    if chat_id != OWNER_CHAT_ID:
+        await update.message.reply_text("Comando solo para el owner.")
+        return
+    kb = [
+        [InlineKeyboardButton("📊 CRM — Resumen general", callback_data="rma:summary")],
+        [InlineKeyboardButton("👥 Cuentas",        callback_data="sf:accounts"),
+         InlineKeyboardButton("📞 Contactos",      callback_data="sf:contacts")],
+        [InlineKeyboardButton("💼 Oportunidades",  callback_data="sf:opps"),
+         InlineKeyboardButton("📈 Pipeline",       callback_data="sf:pipeline")],
+        [InlineKeyboardButton("📜 Contratos",      callback_data="sf:obj:Contratos__c"),
+         InlineKeyboardButton("📝 Endosos",        callback_data="sf:obj:Endosos__c")],
+        [InlineKeyboardButton("🌎 Por industria",  callback_data="sf:industries"),
+         InlineKeyboardButton("🌍 Por país",        callback_data="sf:countries")],
+        [InlineKeyboardButton("👤 Brokers / Performance", callback_data="rma:brokers")],
+        [InlineKeyboardButton("📂 Listar todos los objetos", callback_data="sf:list")],
+        [InlineKeyboardButton("⚡ Comandos directos", callback_data="rma:tools")],
+        [InlineKeyboardButton("❓ Ayuda",          callback_data="rma:help")],
+    ]
+    await update.message.reply_text(
+        "🏢 *REAMERICA RISK ADVISORS*\n"
+        "_Hub principal — elegí qué querés ver._",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(kb)
+    )
+
+
+async def handle_rma_callback(update, context):
+    """Callbacks del menú /rma. Maneja navegación + brokers list + ayuda."""
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    query = update.callback_query
+    await query.answer()
+    chat_id = query.message.chat.id
+    parts = query.data.split(":", 2)
+    action = parts[1] if len(parts) > 1 else ""
+    extra  = parts[2] if len(parts) > 2 else ""
+
+    try:
+        from services.salesforce import sf_query
+        from services.tenants import resolve_tenant
+        tslug = resolve_tenant(chat_id) or "reamerica"
+
+        if action == "back":
+            # Volver al menu principal
+            kb = [
+                [InlineKeyboardButton("📊 CRM — Resumen general", callback_data="rma:summary")],
+                [InlineKeyboardButton("👥 Cuentas",        callback_data="sf:accounts"),
+                 InlineKeyboardButton("📞 Contactos",      callback_data="sf:contacts")],
+                [InlineKeyboardButton("💼 Oportunidades",  callback_data="sf:opps"),
+                 InlineKeyboardButton("📈 Pipeline",       callback_data="sf:pipeline")],
+                [InlineKeyboardButton("📜 Contratos",      callback_data="sf:obj:Contratos__c"),
+                 InlineKeyboardButton("📝 Endosos",        callback_data="sf:obj:Endosos__c")],
+                [InlineKeyboardButton("🌎 Por industria",  callback_data="sf:industries"),
+                 InlineKeyboardButton("🌍 Por país",        callback_data="sf:countries")],
+                [InlineKeyboardButton("👤 Brokers / Performance", callback_data="rma:brokers")],
+                [InlineKeyboardButton("📂 Listar todos los objetos", callback_data="sf:list")],
+                [InlineKeyboardButton("⚡ Comandos directos", callback_data="rma:tools")],
+                [InlineKeyboardButton("❓ Ayuda",          callback_data="rma:help")],
+            ]
+            await query.edit_message_text(
+                "🏢 *REAMERICA RISK ADVISORS*\n_Hub principal — elegí qué querés ver._",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(kb)
+            )
+            return
+
+        if action == "summary":
+            ta = sf_query("SELECT COUNT(Id) c FROM Account")[0]["c"]
+            tc = sf_query("SELECT COUNT(Id) c FROM Contact")[0]["c"]
+            to = sf_query("SELECT COUNT(Id) c FROM Opportunity")[0]["c"]
+            tco = sf_query("SELECT COUNT(Id) c FROM Contratos__c")[0]["c"]
+            te = sf_query("SELECT COUNT(Id) c FROM Endosos__c")[0]["c"]
+            ti = sf_query("SELECT COUNT(Id) c FROM IBF__c")[0]["c"]
+            tot = sf_query("SELECT SUM(Prima_periodo_100__c) p FROM IBF__c")[0]["p"] or 0
+            txt = (
+                "📊 *CRM Reamerica — Resumen general*\n\n"
+                f"👥 Cuentas: *{ta:,}*  ·  📞 Contactos: *{tc:,}*\n"
+                f"💼 Opps: *{to:,}*  ·  📜 Contratos: *{tco:,}*  ·  📝 Endosos: *{te:,}*\n"
+                f"📋 IBFs: *{ti:,}*\n\n"
+                f"💰 Prima 100% acumulada (todos los IBFs): *${tot:,.0f}*"
+            )
+            kb = [[InlineKeyboardButton("← Volver al hub", callback_data="rma:back")]]
+            await query.edit_message_text(txt, parse_mode="Markdown",
+                                          reply_markup=InlineKeyboardMarkup(kb))
+            return
+
+        if action == "brokers":
+            # Top brokers por # opportunities (Owner)
+            rows = sf_query(
+                "SELECT Owner.Name name, OwnerId oid, COUNT(Id) c "
+                "FROM Opportunity WHERE OwnerId != null "
+                "GROUP BY Owner.Name, OwnerId ORDER BY COUNT(Id) DESC LIMIT 12"
+            )
+            kb = []
+            for r in rows:
+                nm = r.get("name") or "?"
+                oid = r.get("oid") or ""
+                c = r.get("c") or 0
+                # callback_data tiene 64 chars max — uso solo el OwnerId (15 chars)
+                kb.append([InlineKeyboardButton(f"{nm} ({c} opps)", callback_data=f"rma:broker:{oid}")])
+            kb.append([InlineKeyboardButton("← Volver al hub", callback_data="rma:back")])
+            await query.edit_message_text(
+                "👥 *Brokers — Top 12 por volumen de opps*\n_Tocá uno para ver su dashboard._",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(kb)
+            )
+            return
+
+        if action == "broker" and extra:
+            # Dashboard de un broker — invocar sf_broker_perf y devolver
+            from services.sf_broker_perf import resolve_broker, compute, format_dashboard
+            await query.answer("Calculando...", show_alert=False)
+            b = resolve_broker(extra)
+            if not b:
+                await query.edit_message_text(f"No encontré broker para Id `{extra}`",
+                                              parse_mode="Markdown")
+                return
+            metrics = compute(b["Id"])
+            text = format_dashboard(b, metrics)
+            kb = [
+                [InlineKeyboardButton("📅 Solo 2025", callback_data=f"rma:brokerY:{extra}:2025"),
+                 InlineKeyboardButton("📅 Solo 2024", callback_data=f"rma:brokerY:{extra}:2024")],
+                [InlineKeyboardButton("← Volver a brokers", callback_data="rma:brokers"),
+                 InlineKeyboardButton("🏠 Hub", callback_data="rma:back")],
+            ]
+            await query.edit_message_text(text[:3900], parse_mode="Markdown",
+                                          reply_markup=InlineKeyboardMarkup(kb))
+            return
+
+        if action == "brokerY" and ":" in extra:
+            from services.sf_broker_perf import resolve_broker, compute, format_dashboard
+            uid, yr = extra.split(":", 1)
+            await query.answer("Calculando...", show_alert=False)
+            b = resolve_broker(uid)
+            if not b:
+                await query.edit_message_text("Broker no encontrado.")
+                return
+            metrics = compute(b["Id"], year=int(yr))
+            text = format_dashboard(b, metrics)
+            kb = [
+                [InlineKeyboardButton("📅 Histórico", callback_data=f"rma:broker:{uid}")],
+                [InlineKeyboardButton("← Brokers", callback_data="rma:brokers"),
+                 InlineKeyboardButton("🏠 Hub", callback_data="rma:back")],
+            ]
+            await query.edit_message_text(text[:3900], parse_mode="Markdown",
+                                          reply_markup=InlineKeyboardMarkup(kb))
+            return
+
+        if action == "tools":
+            txt = (
+                "⚡ *Comandos directos Reamerica*\n\n"
+                "*CRM:*\n"
+                "• `/sf list` — todos los sObjects\n"
+                "• `/sf describe Account` — campos del sObject\n"
+                "• `/sf SELECT Id,Name FROM Account LIMIT 10` — SOQL crudo\n"
+                "• `/sf <pregunta natural>` — el LLM arma la query\n\n"
+                "*Brokers:*\n"
+                "• `/broker Ignacio Romanelli` — dashboard histórico\n"
+                "• `/broker Tomas Barrabino 2025` — solo 2025\n\n"
+                "*Conversacional:* hablale natural y el bot rutea solo.\n"
+                "_Solo lectura. INSERT/UPDATE/DELETE bloqueados._"
+            )
+            kb = [[InlineKeyboardButton("← Volver al hub", callback_data="rma:back")]]
+            await query.edit_message_text(txt, parse_mode="Markdown",
+                                          reply_markup=InlineKeyboardMarkup(kb))
+            return
+
+        if action == "help":
+            txt = (
+                "❓ *Ayuda — Reamerica*\n\n"
+                "Este es el hub para todo lo relacionado a Reamerica Risk Advisors:\n"
+                "• Datos del CRM Salesforce (cuentas, contactos, oportunidades)\n"
+                "• Performance de brokers (dashboards individuales)\n"
+                "• Reportes (próximamente: Quickbooks, dashboards consolidados)\n\n"
+                "*Cómo navegar:*\n"
+                "1. Tocá un botón para ir a esa sección\n"
+                "2. Cada sección tiene un botón ← para volver\n"
+                "3. Para queries específicas, usá `/rma:tools` o tipeá natural\n\n"
+                "*Restricción:* Salesforce solo lectura. Para escribir, usá la UI de SF y "
+                "después podés pedirme que lea los cambios.\n\n"
+                "Ambiente actual: *UAT* (sandbox de pruebas). Cuando pasen a PROD, "
+                "se cambia automáticamente."
+            )
+            kb = [[InlineKeyboardButton("← Volver al hub", callback_data="rma:back")]]
+            await query.edit_message_text(txt, parse_mode="Markdown",
+                                          reply_markup=InlineKeyboardMarkup(kb))
+            return
+
+        await query.edit_message_text(f"Acción `rma:{action}` no reconocida.",
+                                      parse_mode="Markdown")
+    except Exception as e:
+        log.error(f"[{chat_id}] rma callback error: {e}")
         try:
             await query.edit_message_text(f"Error: {str(e)[:300]}")
         except Exception:
