@@ -77,6 +77,15 @@ _PATTERNS = {
         r"siniestro", r"prima", r"cobertura", r"cedente", r"reasegurador",
         r"treaty", r"facultativo", r"xs[lL]", r"excess of loss", r"quota share",
         r"retenci[oó]n", r"contrato de reaseguro", r"programa",
+        # Salesforce — toda interaccion SF cae en este intent (regla owner)
+        r"\bsalesforce\b", r"\bsf\b", r"\bcrm\b", r"\bsoql\b",
+        r"\baccount(s)?\b(?!\s+(?:a|de)\s+(?:gmail|google|github|telegram|instagram|twitter|facebook))",
+        r"\boportunidad(es)?\b", r"\bopportunity\b", r"\bopportunities\b",
+        r"\blead(s)?\b", r"\bpipeline\b", r"\bendoso(s)?\b",
+        r"\bibf\b", r"\bbordereaux\b", r"\bcedente(s)?\b",
+        r"\breasegurador(es)?\b", r"\bbroker(s)?\b",
+        r"\bprima\s+(?:emitida|cedida|total|del?\s+ano|por\s+mes)\b",
+        r"\bcontrato(s)?\s+de\s+reaseguro\b",
     ],
     "astrology": [
         r"astro", r"carta natal", r"tr[aá]nsito", r"planeta", r"signo",

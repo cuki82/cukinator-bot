@@ -1822,12 +1822,19 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
     _tenant_whitelist = set() if is_owner else get_tenant_tools_filter(chat_id)
     _always_on = {"get_time", "get_weather"}  # utility universales, nunca filtrar
 
+    # Tools gateadas por intent: solo se exponen al LLM si el intent matchea.
+    # Decisión del user: Salesforce SOLO desde el agente reaseguros.
+    INTENT_GATED_TOOLS = {
+        "sf_consultar": {"reinsurance"},
+    }
+
     tools_activos = [
         t for t in TOOLS
         if (allow_voice or t["name"] != "enviar_voz")
         and (is_owner or t["name"] not in OWNER_ONLY_TOOLS)
         and t["name"] not in NEVER_LLM_TOOLS
         and (not _tenant_whitelist or t["name"] in _tenant_whitelist or t["name"] in _always_on)
+        and (t["name"] not in INTENT_GATED_TOOLS or _intent_pre in INTENT_GATED_TOOLS[t["name"]])
     ]
 
     # Límite dinámico según complejidad del mensaje
