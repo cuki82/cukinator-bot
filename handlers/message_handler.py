@@ -1600,6 +1600,119 @@ async def cmd_broker(update, context):
         await update.message.reply_text(f"Error: {str(e)[:300]}")
 
 
+async def cmd_stats(update, context):
+    """Stats del service cukinator.service (o el que se pase como arg).
+    Devuelve PID, memoria (MB), CPU acumulado (s), uptime y estado. Owner-only.
+
+    Uso:
+      /stats                     → cukinator.service
+      /stats cukinator-mcp       → otro service user-level
+      /stats all                 → resumen de los 5 services del bot
+    """
+    from core.bot_core import OWNER_CHAT_ID
+    chat_id = update.effective_chat.id
+    if chat_id != OWNER_CHAT_ID:
+        await update.message.reply_text("Solo owner.")
+        return
+
+    args = context.args or []
+    if args and args[0].lower() == "all":
+        services = [
+            "cukinator.service",
+            "cukinator-worker.service",
+            "cukinator-mcp.service",
+            "cukinator-designer.service",
+            "cukinator-remote.service",
+        ]
+    else:
+        svc = args[0] if args else "cukinator.service"
+        if not svc.endswith(".service"):
+            svc += ".service"
+        services = [svc]
+
+    lines = []
+    for s in services:
+        lines.append(_format_service_stats(s))
+    await update.message.reply_text("\n\n".join(lines)[:4000], parse_mode="Markdown")
+
+
+def _format_service_stats(service: str) -> str:
+    """Ejecuta systemctl --user show y formatea como markdown Telegram.
+    Safe: captura errores, usa timeout corto."""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["systemctl", "--user", "show", service,
+             "--property=MainPID,MemoryCurrent,CPUUsageNSec,"
+             "ActiveEnterTimestamp,ActiveState,SubState,LoadState",
+             "--no-pager"],
+            capture_output=True, text=True, timeout=6,
+        )
+    except FileNotFoundError:
+        return f"❓ *{service}*: systemctl no disponible (¿Windows?)"
+    except subprocess.TimeoutExpired:
+        return f"⏰ *{service}*: timeout consultando systemd"
+    except Exception as e:
+        return f"❌ *{service}*: {str(e)[:80]}"
+
+    if result.returncode != 0:
+        return f"❌ *{service}*: {(result.stderr or '')[:120]}"
+
+    data = {}
+    for line in (result.stdout or "").strip().splitlines():
+        if "=" in line:
+            k, v = line.split("=", 1)
+            data[k] = v
+
+    if data.get("LoadState") == "not-found":
+        return f"❓ *{service}*: service no existe"
+
+    pid         = data.get("MainPID", "0")
+    mem_bytes   = int(data.get("MemoryCurrent", "0") or 0)
+    cpu_ns      = int(data.get("CPUUsageNSec", "0") or 0)
+    active_ts   = data.get("ActiveEnterTimestamp", "")
+    active      = data.get("ActiveState", "?")
+    sub         = data.get("SubState", "?")
+
+    mem_mb  = mem_bytes / (1024 * 1024) if mem_bytes else 0
+    cpu_sec = cpu_ns / 1e9 if cpu_ns else 0
+    uptime  = _parse_systemd_uptime(active_ts)
+    icon    = {"active": "✅", "failed": "❌", "inactive": "⏸", "activating": "🔄"}.get(active, "❓")
+
+    return (
+        f"{icon} *{service}* — `{active}/{sub}`\n"
+        f"🆔 PID `{pid}` · 💾 {mem_mb:,.1f} MB · ⏲️ CPU {cpu_sec:,.1f}s · ⏰ up {uptime}"
+    )
+
+
+def _parse_systemd_uptime(active_ts: str) -> str:
+    """Parsea 'Sun 2026-04-20 14:15:00 UTC' y devuelve '3h 12m' o similar."""
+    if not active_ts or active_ts in ("0", "n/a"):
+        return "—"
+    try:
+        from datetime import datetime, timezone
+        parts = active_ts.strip().split()
+        if len(parts) < 3:
+            return "—"
+        dt_str = f"{parts[1]} {parts[2]}"
+        dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        total_s = int((datetime.now(timezone.utc) - dt).total_seconds())
+        if total_s < 0:
+            return "—"
+        days,  rem  = divmod(total_s, 86400)
+        hours, rem  = divmod(rem, 3600)
+        mins,  secs = divmod(rem, 60)
+        if days:
+            return f"{days}d {hours}h {mins}m"
+        if hours:
+            return f"{hours}h {mins}m"
+        if mins:
+            return f"{mins}m {secs}s"
+        return f"{secs}s"
+    except Exception:
+        return "—"
+
+
 async def cmd_qr(update, context):
     """Genera QR code del texto/URL pasado. /qr <texto o URL>
     Ejemplos:
