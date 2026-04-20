@@ -1600,6 +1600,53 @@ async def cmd_broker(update, context):
         await update.message.reply_text(f"Error: {str(e)[:300]}")
 
 
+async def cmd_version(update, context):
+    """Versión del código corriendo en el bot.
+    Muestra `git describe --always` (tag/sha), rama actual, y último commit.
+
+    Uso: /version
+    """
+    import subprocess
+    import os
+    chat_id = update.effective_chat.id
+
+    repo_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    def _git(args, default="—"):
+        try:
+            r = subprocess.run(["git", "-C", repo_dir] + args,
+                               capture_output=True, text=True, timeout=5)
+            if r.returncode != 0:
+                return default
+            return (r.stdout or "").strip() or default
+        except FileNotFoundError:
+            return "(git no instalado)"
+        except subprocess.TimeoutExpired:
+            return "(timeout)"
+        except Exception:
+            return default
+
+    describe = _git(["describe", "--always", "--dirty", "--tags"])
+    branch   = _git(["rev-parse", "--abbrev-ref", "HEAD"])
+    last_log = _git(["log", "-1", "--format=%h %s (%ar)"])
+    is_repo  = _git(["rev-parse", "--is-inside-work-tree"], default="false")
+
+    if is_repo != "true":
+        await update.message.reply_text(
+            "⚠️ No es un repo git (o git no disponible).",
+            parse_mode="Markdown"
+        )
+        return
+
+    msg = (
+        "🏷 *Versión del código*\n\n"
+        f"• Describe: `{describe}`\n"
+        f"• Rama: `{branch}`\n"
+        f"• Último commit: `{last_log}`"
+    )
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+
 async def cmd_stats(update, context):
     """Stats del service cukinator.service (o el que se pase como arg).
     Devuelve PID, memoria (MB), CPU acumulado (s), uptime y estado. Owner-only.
