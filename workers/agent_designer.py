@@ -89,18 +89,37 @@ class DesignResult(BaseModel):
 
 # ── Brand context via RAG ─────────────────────────────────────────────────
 
+# Defaults hardcoded por tenant — fallback cuando RAG está vacío o no responde.
+# Si hay brand manual indexado en kb_documents ns=brand, gana ese (más rico).
+TENANT_BRAND_DEFAULTS = {
+    "reamerica": (
+        "Identidad de REAMERICA RISK ADVISORS (reaseguros profesional, sobrio, confiable).\n"
+        "Colores: primary=#1A171B (negro corporativo), accent=#C60820 (rojo brillante marca), "
+        "secondary=#8F001A (rojo granate), background=#FFFFFF, muted=#E5E2DD (gris claro), "
+        "warm=#CABA9C (beige). Fuente digital: Roboto. Fuente impresa: Franklin Gothic Medium.\n"
+        "Tono: empoderador, técnico, empático. Estilo fotográfico: animales (águila, león, ballena) "
+        "en alta calidad, B&N o color saturado. Evitar: emojis decorativos, marketing agresivo, "
+        "fondos azules con el logo."
+    ),
+    # otros tenants se agregan acá según ingesten manual
+}
+
 def _fetch_brand_context(tenant: str, brief: str, top_k: int = 5) -> str:
-    """Busca chunks del manual de identidad del tenant. Namespace 'brand'."""
+    """Busca chunks del manual de identidad del tenant. Namespace 'brand'.
+    Si no hay nada en RAG, cae al default hardcoded del tenant (si existe)."""
     try:
         from modules.rag_kb import build_context
-        return build_context(
+        ctx = build_context(
             query=f"identidad visual branding {brief}",
             top_k=top_k, namespace="brand",
             tenant=tenant, with_citations=False,
         ) or ""
+        if ctx.strip():
+            return ctx
     except Exception as e:
         log.debug(f"brand rag skip: {e}")
-        return ""
+    # Fallback: defaults hardcoded por tenant
+    return TENANT_BRAND_DEFAULTS.get(tenant, "")
 
 
 # ── Generators por tipo ───────────────────────────────────────────────────
