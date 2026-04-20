@@ -1036,6 +1036,69 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Error procesando la imagen: {e}")
 
 
+async def cmd_sf(update, context):
+    """Salesforce CLI directo. Owner-only.
+    Usos:
+      /sf SELECT Id,Name FROM Account LIMIT 5
+      /sf describe Account
+      /sf list
+    """
+    from core.bot_core import OWNER_CHAT_ID
+    chat_id = update.effective_chat.id
+    if chat_id != OWNER_CHAT_ID:
+        await update.message.reply_text("Comando solo para el owner.")
+        return
+    args = context.args or []
+    if not args:
+        await update.message.reply_text(
+            "Uso:\n"
+            "• `/sf SELECT Id,Name FROM Account LIMIT 5`\n"
+            "• `/sf describe Account` — campos del sObject\n"
+            "• `/sf list` — sObjects queryables disponibles",
+            parse_mode="Markdown"
+        )
+        return
+    try:
+        from services.salesforce import sf_query, sf_describe, sf_list_objects
+        from services.tenants import resolve_tenant
+        tslug = resolve_tenant(chat_id) or "reamerica"
+        sub = args[0].lower()
+        if sub == "describe" and len(args) >= 2:
+            obj = args[1]
+            d = sf_describe(obj, tenant=tslug, env="uat")
+            fields = d.get("fields", [])
+            lines = [f"*{obj}* — {len(fields)} campos:"]
+            for f in fields[:60]:
+                tag = " 🔧" if f.get("custom") else ""
+                lines.append(f"`{f['name']}` ({f.get('type')}){tag} — {f.get('label','')[:50]}")
+            await update.message.reply_text("\n".join(lines)[:4000], parse_mode="Markdown")
+            return
+        if sub == "list":
+            objs = sf_list_objects(tenant=tslug, env="uat")
+            lines = [f"*{len(objs)} sObjects queryables:*"]
+            for o in objs[:80]:
+                tag = " 🔧" if o["custom"] else ""
+                lines.append(f"`{o['name']}`{tag} — {o['label']}")
+            await update.message.reply_text("\n".join(lines)[:4000], parse_mode="Markdown")
+            return
+        # Default: tratar como SOQL
+        soql = " ".join(args)
+        rows = sf_query(soql, tenant=tslug, env="uat", max_records=50)
+        if not rows:
+            await update.message.reply_text(f"Sin resultados para:\n`{soql}`", parse_mode="Markdown")
+            return
+        clean = [{k: v for k, v in r.items() if k != "attributes"} for r in rows[:25]]
+        import json as _j
+        body = _j.dumps(clean, indent=1, ensure_ascii=False, default=str)[:3700]
+        await update.message.reply_text(
+            f"*{len(rows)} registros* (primeros 25):\n```json\n{body}\n```",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        log.error(f"[{chat_id}] /sf error: {e}")
+        await update.message.reply_text(f"Error: {str(e)[:300]}")
+
+
 async def cmd_qr(update, context):
     """Genera QR code del texto/URL pasado. /qr <texto o URL>
     Ejemplos:

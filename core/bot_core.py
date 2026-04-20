@@ -885,6 +885,25 @@ TOOLS = [
         }
     },
     {
+        "name": "sf_consultar",
+        "description": (
+            "Consulta el CRM Salesforce del tenant (REAMERICA UAT por default). "
+            "Usá cuando el user pida 'cuántos accounts tengo', 'mostrame los contactos de X', "
+            "'qué oportunidades hay en pipeline', 'datos de la cuenta Y', 'opportunities cerradas este mes', etc. "
+            "Aceptá SOQL directo si el user lo pasa, o construilo vos a partir de la pregunta. "
+            "RESTRICCIÓN: solo SELECT. NO INSERT/UPDATE/DELETE — esos requieren confirmación explícita "
+            "y van por otro canal. Si el user pide modificar/borrar, decile que hace falta /sf con confirmación."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "soql":   {"type": "string", "description": "Query SOQL completa. Ej: 'SELECT Id,Name,Industry FROM Account WHERE Industry=\\'Insurance\\' LIMIT 20'. Usá comillas simples para strings."},
+                "object": {"type": "string", "description": "OPCIONAL. Si pasás 'object' SIN 'soql', describo el sObject (campos, tipos). Ej: 'Account', 'Contact', 'Opportunity', 'Policy__c'."},
+                "env":    {"type": "string", "description": "Ambiente: 'uat' (default) o 'prod' cuando esté configurado."},
+            }
+        }
+    },
+    {
         "name": "image_gen",
         "description": (
             "Genera una imagen con DALL-E 3 (OpenAI) y la envía al chat. "
@@ -2152,6 +2171,43 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
                         except Exception as e:
                             result = f"Error buscando video: {e}"
                             log.error(f"buscar_video error: {e}")
+
+                    elif block.name == "sf_consultar":
+                        try:
+                            from services.salesforce import (
+                                sf_query as _sfq, sf_describe as _sfd, is_select_only as _sfok
+                            )
+                            from services.tenants import resolve_tenant as _rt_sf
+                            _tslug = _rt_sf(chat_id) or "reamerica"
+                            _env = (block.input.get("env") or "uat").lower()
+                            _soql = block.input.get("soql") or ""
+                            _obj  = block.input.get("object") or ""
+                            if _soql:
+                                if not _sfok(_soql):
+                                    result = "sf_consultar: solo se aceptan SELECT desde el LLM. Para INSERT/UPDATE/DELETE usá /sf desde el owner."
+                                else:
+                                    rows = _sfq(_soql, tenant=_tslug, env=_env, max_records=50)
+                                    if not rows:
+                                        result = f"SOQL ejecutado (sin resultados): {_soql}"
+                                    else:
+                                        # Compactar resultado para el LLM (sin attributes Salesforce-internos)
+                                        clean = []
+                                        for r in rows[:30]:
+                                            clean.append({k: v for k, v in r.items() if k != "attributes"})
+                                        result = f"{len(rows)} registros (mostrando hasta 30):\n{json.dumps(clean, indent=1, ensure_ascii=False, default=str)[:3500]}"
+                            elif _obj:
+                                d = _sfd(_obj, tenant=_tslug, env=_env)
+                                fields = d.get("fields", [])[:80]
+                                fcompact = [{"name": f["name"], "type": f.get("type"),
+                                             "label": f.get("label"),
+                                             "custom": f.get("custom", False)} for f in fields]
+                                result = f"sObject {_obj} — {len(fields)} campos (primeros 80):\n{json.dumps(fcompact, indent=1, ensure_ascii=False)[:3500]}"
+                            else:
+                                result = "sf_consultar: pasá 'soql' (query) o 'object' (describe)."
+                            log.info(f"[{chat_id}] sf_consultar tenant={_tslug} env={_env} {'soql' if _soql else 'describe'}")
+                        except Exception as e:
+                            result = f"sf_consultar error: {e}"
+                            log.warning(f"[{chat_id}] sf_consultar fail: {e}")
 
                     elif block.name == "image_gen":
                         try:
@@ -4732,8 +4788,9 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("menu",       cmd_menu))
     app.add_handler(CommandHandler("biblioteca", cmd_biblioteca))
     try:
-        from handlers.message_handler import cmd_qr as _cmd_qr_legacy
+        from handlers.message_handler import cmd_qr as _cmd_qr_legacy, cmd_sf as _cmd_sf_legacy
         app.add_handler(CommandHandler("qr",     _cmd_qr_legacy))
+        app.add_handler(CommandHandler("sf",     _cmd_sf_legacy))
     except Exception:
         pass
     app.add_handler(CallbackQueryHandler(handle_biblioteca_callback, pattern="^lib:"))
