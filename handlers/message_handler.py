@@ -1037,29 +1037,41 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_sf(update, context):
-    """Salesforce CLI directo. Owner-only.
-    Usos:
-      /sf SELECT Id,Name FROM Account LIMIT 5
-      /sf describe Account
-      /sf list
-    """
+    """Salesforce CRM — solo lectura. Owner-only. /sf sin args muestra menú."""
     from core.bot_core import OWNER_CHAT_ID
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
     chat_id = update.effective_chat.id
     if chat_id != OWNER_CHAT_ID:
         await update.message.reply_text("Comando solo para el owner.")
         return
     args = context.args or []
     if not args:
+        kb = [
+            [InlineKeyboardButton("📊 Resumen general",      callback_data="sf:summary")],
+            [InlineKeyboardButton("👥 Cuentas (Accounts)",   callback_data="sf:accounts"),
+             InlineKeyboardButton("📞 Contactos",            callback_data="sf:contacts")],
+            [InlineKeyboardButton("💼 Oportunidades",        callback_data="sf:opps"),
+             InlineKeyboardButton("📈 Pipeline por stage",   callback_data="sf:pipeline")],
+            [InlineKeyboardButton("📜 Contratos__c",         callback_data="sf:obj:Contratos__c"),
+             InlineKeyboardButton("📝 Endosos__c",           callback_data="sf:obj:Endosos__c")],
+            [InlineKeyboardButton("👤 Terceros__c",          callback_data="sf:obj:Tercero__c"),
+             InlineKeyboardButton("📄 Cláusulas",            callback_data="sf:obj:Textos_y_Clausulas__c")],
+            [InlineKeyboardButton("🌎 Por industria",         callback_data="sf:industries"),
+             InlineKeyboardButton("🌍 Por país",              callback_data="sf:countries")],
+            [InlineKeyboardButton("🗂 Listar todos los objetos", callback_data="sf:list")],
+            [InlineKeyboardButton("❓ Cómo usar /sf manual",  callback_data="sf:help")],
+        ]
         await update.message.reply_text(
-            "Uso:\n"
-            "• `/sf SELECT Id,Name FROM Account LIMIT 5`\n"
-            "• `/sf describe Account` — campos del sObject\n"
-            "• `/sf list` — sObjects queryables disponibles",
-            parse_mode="Markdown"
+            "*Salesforce CRM — Reamerica UAT*\n"
+            "_Solo lectura. Elegí una opción o tipeá una pregunta natural._",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(kb)
         )
         return
+
+    # Modo CLI directo (con args)
     try:
-        from services.salesforce import sf_query, sf_describe, sf_list_objects
+        from services.salesforce import sf_query, sf_describe, sf_list_objects, is_select_only
         from services.tenants import resolve_tenant
         tslug = resolve_tenant(chat_id) or "reamerica"
         sub = args[0].lower()
@@ -1081,8 +1093,16 @@ async def cmd_sf(update, context):
                 lines.append(f"`{o['name']}`{tag} — {o['label']}")
             await update.message.reply_text("\n".join(lines)[:4000], parse_mode="Markdown")
             return
-        # Default: tratar como SOQL
+        # Default: SOQL crudo. HARD GUARD: solo SELECT.
         soql = " ".join(args)
+        if not is_select_only(soql):
+            await update.message.reply_text(
+                "❌ *Bloqueado.* Salesforce está configurado en modo SOLO LECTURA.\n"
+                "Solo se permiten queries `SELECT`. Para INSERT/UPDATE/DELETE, "
+                "usá la UI de Salesforce y después puedo leer los cambios.",
+                parse_mode="Markdown"
+            )
+            return
         rows = sf_query(soql, tenant=tslug, env="uat", max_records=50)
         if not rows:
             await update.message.reply_text(f"Sin resultados para:\n`{soql}`", parse_mode="Markdown")
@@ -1097,6 +1117,190 @@ async def cmd_sf(update, context):
     except Exception as e:
         log.error(f"[{chat_id}] /sf error: {e}")
         await update.message.reply_text(f"Error: {str(e)[:300]}")
+
+
+async def handle_sf_callback(update, context):
+    """Callbacks del menú /sf. Cada botón ejecuta una query de solo lectura."""
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    query = update.callback_query
+    await query.answer()
+    chat_id = query.message.chat.id
+    data = query.data  # ej: "sf:summary", "sf:accounts", "sf:obj:Contratos__c"
+    parts = data.split(":", 2)
+    action = parts[1] if len(parts) > 1 else ""
+    extra  = parts[2] if len(parts) > 2 else ""
+
+    try:
+        from services.salesforce import sf_query, sf_describe, sf_list_objects
+        from services.tenants import resolve_tenant
+        tslug = resolve_tenant(chat_id) or "reamerica"
+        env = "uat"
+
+        if action == "help":
+            txt = (
+                "*Comandos SF directos:*\n"
+                "• `/sf list` — todos los sObjects\n"
+                "• `/sf describe Account` — campos\n"
+                "• `/sf SELECT Id,Name FROM Account LIMIT 10` — SOQL crudo\n\n"
+                "*Conversacional:* tipeá natural, ej.\n"
+                "• \"primeros 10 accounts de Argentina\"\n"
+                "• \"oportunidades en stage Orden en firme\"\n"
+                "• \"contratos creados este mes\"\n\n"
+                "_Solo lectura. INSERT/UPDATE/DELETE bloqueados._"
+            )
+            await query.edit_message_text(txt, parse_mode="Markdown")
+            return
+
+        if action == "summary":
+            ta = sf_query("SELECT COUNT(Id) c FROM Account")[0]["c"]
+            tc = sf_query("SELECT COUNT(Id) c FROM Contact")[0]["c"]
+            to = sf_query("SELECT COUNT(Id) c FROM Opportunity")[0]["c"]
+            tco = sf_query("SELECT COUNT(Id) c FROM Contratos__c")[0]["c"]
+            te = sf_query("SELECT COUNT(Id) c FROM Endosos__c")[0]["c"]
+            tt = sf_query("SELECT COUNT(Id) c FROM Tercero__c")[0]["c"]
+            txt = (
+                "*Resumen Salesforce — Reamerica UAT*\n\n"
+                f"👥 Accounts (clientes): *{ta:,}*\n"
+                f"📞 Contacts (personas): *{tc:,}*\n"
+                f"💼 Opportunities: *{to:,}*\n"
+                f"📜 Contratos\\_\\_c: *{tco:,}*\n"
+                f"📝 Endosos\\_\\_c: *{te:,}*\n"
+                f"👤 Tercero\\_\\_c: *{tt:,}*\n"
+            )
+            await query.edit_message_text(txt, parse_mode="Markdown")
+            return
+
+        if action == "accounts":
+            rows = sf_query(
+                "SELECT Name, Industry, Type, BillingCountry FROM Account "
+                "ORDER BY LastModifiedDate DESC LIMIT 20"
+            )
+            lines = [f"*Últimas 20 cuentas modificadas:*"]
+            for r in rows:
+                nm = (r.get("Name") or "")[:35]
+                ind = (r.get("Industry") or "—")[:20]
+                tp = (r.get("Type") or "—")[:12]
+                pais = (r.get("BillingCountry") or "—")[:12]
+                lines.append(f"• *{nm}* — {ind} · {tp} · {pais}")
+            await query.edit_message_text("\n".join(lines)[:4000], parse_mode="Markdown")
+            return
+
+        if action == "contacts":
+            rows = sf_query(
+                "SELECT Name, Title, Email, Account.Name FROM Contact "
+                "WHERE Email != null ORDER BY LastModifiedDate DESC LIMIT 15"
+            )
+            lines = [f"*Últimos 15 contactos con email:*"]
+            for r in rows:
+                nm = (r.get("Name") or "")[:25]
+                title = (r.get("Title") or "—")[:20]
+                email = (r.get("Email") or "—")[:30]
+                acct = ((r.get("Account") or {}).get("Name") or "—")[:20]
+                lines.append(f"• *{nm}* — {title}\n  📧 `{email}`\n  🏢 {acct}")
+            await query.edit_message_text("\n".join(lines)[:4000], parse_mode="Markdown")
+            return
+
+        if action == "opps":
+            rows = sf_query(
+                "SELECT Name, StageName, Amount, CloseDate, Account.Name FROM Opportunity "
+                "ORDER BY LastModifiedDate DESC LIMIT 15"
+            )
+            lines = [f"*Últimas 15 oportunidades modificadas:*"]
+            for r in rows:
+                nm = (r.get("Name") or "")[:30]
+                stage = (r.get("StageName") or "—")[:20]
+                amt = r.get("Amount") or 0
+                close = r.get("CloseDate") or "—"
+                acct = ((r.get("Account") or {}).get("Name") or "—")[:20]
+                lines.append(f"• *{nm}*\n  {stage} · ${amt} · cierre {close}\n  🏢 {acct}")
+            await query.edit_message_text("\n".join(lines)[:4000], parse_mode="Markdown")
+            return
+
+        if action == "pipeline":
+            rows = sf_query(
+                "SELECT StageName, COUNT(Id) c, SUM(Amount) amt FROM Opportunity "
+                "GROUP BY StageName ORDER BY COUNT(Id) DESC"
+            )
+            lines = ["*Pipeline por stage:*"]
+            tot = 0
+            for r in rows:
+                stage = r.get("StageName") or "(sin stage)"
+                c = r.get("c") or 0
+                amt = r.get("amt") or 0
+                tot += c
+                lines.append(f"• *{stage}* — {c} opps · ${amt:,}")
+            lines.append(f"\n*Total:* {tot} opportunities")
+            await query.edit_message_text("\n".join(lines)[:4000], parse_mode="Markdown")
+            return
+
+        if action == "industries":
+            rows = sf_query(
+                "SELECT Industry, COUNT(Id) c FROM Account "
+                "GROUP BY Industry ORDER BY COUNT(Id) DESC LIMIT 15"
+            )
+            lines = ["*Top 15 industrias (Accounts):*"]
+            for r in rows:
+                ind = (r.get("Industry") or "(sin industria)")[:50]
+                c = r.get("c") or 0
+                lines.append(f"• {ind} — *{c}*")
+            await query.edit_message_text("\n".join(lines), parse_mode="Markdown")
+            return
+
+        if action == "countries":
+            rows = sf_query(
+                "SELECT BillingCountry, COUNT(Id) c FROM Account "
+                "WHERE BillingCountry != null "
+                "GROUP BY BillingCountry ORDER BY COUNT(Id) DESC LIMIT 20"
+            )
+            lines = ["*Top 20 países (Accounts):*"]
+            for r in rows:
+                pais = (r.get("BillingCountry") or "?")[:30]
+                c = r.get("c") or 0
+                lines.append(f"• {pais} — *{c}*")
+            if len(lines) == 1:
+                lines.append("_(no hay BillingCountry cargado en UAT)_")
+            await query.edit_message_text("\n".join(lines), parse_mode="Markdown")
+            return
+
+        if action == "list":
+            objs = sf_list_objects(tenant=tslug, env=env)
+            customs = [o for o in objs if o["custom"]]
+            stds = [o for o in objs if not o["custom"]]
+            lines = [
+                f"*sObjects en SF UAT*",
+                f"\n*Custom ({len(customs)}):*"
+            ]
+            for o in customs[:40]:
+                lines.append(f"`{o['name']}` — {o['label']}")
+            lines.append(f"\n*Standard ({len(stds)} totales, top 30):*")
+            for o in stds[:30]:
+                lines.append(f"`{o['name']}` — {o['label']}")
+            await query.edit_message_text("\n".join(lines)[:4000], parse_mode="Markdown")
+            return
+
+        if action == "obj" and extra:
+            d = sf_describe(extra, tenant=tslug, env=env)
+            fields = d.get("fields", [])
+            cnt_q = sf_query(f"SELECT COUNT(Id) c FROM {extra}")
+            total = cnt_q[0]["c"] if cnt_q else 0
+            lines = [
+                f"*{extra}*",
+                f"_{d.get('label','')} · {total:,} registros_\n",
+                f"*Campos ({len(fields)}, primeros 40):*"
+            ]
+            for f in fields[:40]:
+                tag = " 🔧" if f.get("custom") else ""
+                lines.append(f"`{f['name']}` ({f.get('type')}){tag} — {f.get('label','')[:40]}")
+            await query.edit_message_text("\n".join(lines)[:4000], parse_mode="Markdown")
+            return
+
+        await query.edit_message_text(f"Acción `{action}` no reconocida.", parse_mode="Markdown")
+    except Exception as e:
+        log.error(f"[{chat_id}] sf callback error: {e}")
+        try:
+            await query.edit_message_text(f"Error: {str(e)[:300]}")
+        except Exception:
+            pass
 
 
 async def cmd_qr(update, context):

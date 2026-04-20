@@ -1562,7 +1562,42 @@ Cuando el usuario habla de reinsurance, treaty, facultative, retrocession, under
 - Usá ri_consultar para buscar en la KB interna ANTES de responder
 - Distinguí: doctrina, wording, normativa, práctica operativa
 - No citar automáticamente — solo si hay ambigüedad o el user lo pide
-- Para ingestar documentos usá ri_ingestar"""
+- Para ingestar documentos usá ri_ingestar
+
+SALESFORCE — MAPA RÁPIDO REAMERICA (sObjects clave + queries típicas).
+SOLO LECTURA — NUNCA escribir (no ejecutar INSERT/UPDATE/DELETE; sf_consultar lo bloquea de todas formas):
+
+| Necesidad | sObject | Campos clave |
+|---|---|---|
+| Clientes / proveedores / reaseguradores | `Account` | `Name, Industry, Type, BillingCountry, BillingCity` |
+| Personas / interlocutores | `Contact` | `Name, Title, Email, Account.Name` |
+| Pipeline comercial | `Opportunity` | `Name, StageName, Amount, CloseDate, Account.Name` |
+| Contratos de reaseguro | `Contratos__c` | (vacío en UAT, 0 reg) |
+| Endosos sobre pólizas | `Endosos__c` | (25 reg en UAT) |
+| **Facturación / PRIMAS** | **`IBF__c`** (829 reg) | `Prima_periodo_100__c` (prima 100%), `Prima_cedida__c`, `Comision_total__c`, `Inicio_IBF__c`, `Fin_IBF__c`, `Inicio_de_negocio__c`, `Fecha_de_cobro__c` |
+| IBF consolidado por NDC y terceros | `IBF_Wrapper__c` (981 reg, 187 campos) | similar a IBF__c con prefijos `IBF_*`, `NDC1_*`...`NDC10_*`, `TER1_*`...`TER10_*` |
+| Notas crédito | `Nota_de_credito__c` | montos NC |
+| Cobros a proveedores | `Cobro_a_Proveedores__c` + `Detalle_del_Cobro_a_Proveedores__c` | |
+| Terceros (interv. negocio) | `Tercero__c`, `Terceros_Publicos__c` | |
+| Wording / cláusulas | `Textos_y_Clausulas__c` | |
+| Integración Quickbooks | `QBData__c`, `QB_Connection__c`, `Informacion_Quickbooks__c` | |
+| Generación de docs | `SDOC__SDoc__c`, `SDOC__SDTemplate__c` (12 objetos SDOC__*) | |
+
+Queries típicas — ejemplos directos para sf_consultar:
+
+- **Prima emitida total**: `SELECT COUNT(Id) c, SUM(Prima_periodo_100__c) prima, SUM(Prima_cedida__c) ced FROM IBF__c`
+- **Prima emitida este año**: `... WHERE CreatedDate = THIS_YEAR` (o por `Inicio_IBF__c`/`Inicio_de_negocio__c` si quieren fecha de negocio).
+- **Prima por mes**: `SELECT CALENDAR_MONTH(Inicio_IBF__c) mes, SUM(Prima_periodo_100__c) p FROM IBF__c WHERE CALENDAR_YEAR(Inicio_IBF__c)=2026 GROUP BY CALENDAR_MONTH(Inicio_IBF__c) ORDER BY CALENDAR_MONTH(Inicio_IBF__c)`
+- **Top accounts por industria**: `SELECT Industry, COUNT(Id) c FROM Account GROUP BY Industry ORDER BY COUNT(Id) DESC LIMIT 10`
+- **Pipeline opps por stage**: `SELECT StageName, COUNT(Id) c, SUM(Amount) tot FROM Opportunity GROUP BY StageName`
+- **Endosos recientes**: `SELECT Id, Name, CreatedDate FROM Endosos__c ORDER BY CreatedDate DESC LIMIT 10`
+
+REGLAS:
+- Antes de adivinar campos: si la pregunta es ambigua, llamá `sf_consultar` con `object="<sObject>"` para que devuelva el describe (ahorra iteraciones).
+- Si el user pregunta por "prima/premium" → directo a `IBF__c`. NO inventar `Account.Premium__c`.
+- Si el user pregunta por "póliza/contrato" → primero `Contratos__c`, fallback `Endosos__c`.
+- Si el user pregunta por "factura/cobro" → `IBF__c` o `Cobro_a_Proveedores__c`.
+- Mostrar montos formateados (`${X:,.0f}`), no en notación científica."""
 
 _SYS_GMAIL_CALENDAR = """GMAIL:
 - Mostrar emails: remitente, asunto, fecha, 1 línea de resumen. Nada más.
@@ -1800,7 +1835,15 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
                     "implementá", "implementa", "creá", "crea", "agregá", "agrega",
                     "github", "deploy", "railway", "script", "handler", "integración"]
     is_dev_task = any(k in user_text.lower() for k in DEV_KEYWORDS)
-    max_iterations = 12 if is_dev_task else 6
+    # Reaseguros + Salesforce queries necesitan más iteraciones (schema discovery,
+    # describe + query). Si el intent es reinsurance, damos margen para 3-4 ciclos
+    # de explore→describe→query→render. Sino el LLM se queda sin tools en el medio.
+    if _intent_pre == "reinsurance":
+        max_iterations = 10
+    elif is_dev_task:
+        max_iterations = 12
+    else:
+        max_iterations = 6
     iteration = 0
     last_text = ""
     vps_tools_used = 0
