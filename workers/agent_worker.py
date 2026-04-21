@@ -775,6 +775,36 @@ def _sse(event_type: str, data) -> bytes:
     return f"data: {payload}\n\n".encode("utf-8")
 
 
+def _build_repo_context_preamble() -> str:
+    """Snapshot del repo precargado en el prompt — para que Claude pueda
+    responder 'qué venimos haciendo' sin gastar tool calls explorando."""
+    def _run(cmd: str, timeout: int = 6) -> str:
+        try:
+            r = subprocess.run(cmd, shell=True, capture_output=True, text=True,
+                               timeout=timeout, cwd=REPO_PATH)
+            return (r.stdout or "").strip()
+        except Exception:
+            return ""
+
+    branch = _run("git rev-parse --abbrev-ref HEAD") or "?"
+    head_oneliner = _run("git log -1 --oneline") or "?"
+    log = _run("git log --oneline -15")
+    status = _run("git status -s")
+    files_30d = _run(
+        "git log --since='30 days ago' --pretty=format: --name-only | "
+        "sort | uniq -c | sort -rn | head -10"
+    )
+    return (
+        "── CONTEXTO ACTUAL DEL REPO cukinator-bot (precargado, no hace falta git log) ──\n"
+        f"Branch: {branch}\n"
+        f"HEAD: {head_oneliner}\n\n"
+        f"Últimos commits:\n{log}\n\n"
+        f"Estado uncommitted (git status -s):\n{status or '(limpio)'}\n\n"
+        f"Archivos más tocados últimos 30 días:\n{files_30d or '(sin actividad)'}\n"
+        "── FIN CONTEXTO ──\n\n"
+    )
+
+
 async def _stream_task(task: StreamTask, request: Request) -> AsyncGenerator[bytes, None]:
     started = time.time()
     errors: list = []
@@ -784,15 +814,7 @@ async def _stream_task(task: StreamTask, request: Request) -> AsyncGenerator[byt
 
     yield _sse("status", {"phase": "starting", "msg": "Iniciando agente"})
 
-    # 1) Codex planner (opcional)
-    enhanced = task.user_text
-    if not task.skip_codex_plan:
-        yield _sse("status", {"phase": "planning", "msg": "Codex armando plan técnico (gpt-5-codex)"})
-        loop = asyncio.get_event_loop()
-        enhanced = await loop.run_in_executor(None, codex_plan, task.user_text)
-        yield _sse("plan", {"enhanced_prompt": enhanced[:4000], "len": len(enhanced)})
-
-    # 2) Pull repo
+    # 1) Pull repo (ANTES del context preamble para tener data fresca)
     yield _sse("status", {"phase": "git_pull", "msg": "git fetch + checkout main"})
     try:
         await asyncio.get_event_loop().run_in_executor(
@@ -804,6 +826,19 @@ async def _stream_task(task: StreamTask, request: Request) -> AsyncGenerator[byt
         )
     except Exception as e:
         errors.append(f"git pull: {e}")
+
+    # 2) Codex planner (opcional)
+    enhanced = task.user_text
+    if not task.skip_codex_plan:
+        yield _sse("status", {"phase": "planning", "msg": "Codex armando plan técnico (gpt-5-codex)"})
+        loop = asyncio.get_event_loop()
+        enhanced = await loop.run_in_executor(None, codex_plan, task.user_text)
+        yield _sse("plan", {"enhanced_prompt": enhanced[:4000], "len": len(enhanced)})
+
+    # 3) Pre-cargar contexto del repo en el prompt para Claude (responde
+    # "qué venimos trabajando" al toque sin gastar tool calls).
+    preamble = _build_repo_context_preamble()
+    enhanced = preamble + enhanced
 
     # 3) Spawn claude CLI con stream-json
     yield _sse("status", {"phase": "executing", "msg": "Claude Code CLI ejecutando con tools reales"})
