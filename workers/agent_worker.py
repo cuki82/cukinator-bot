@@ -1,6 +1,6 @@
-import os, sys, subprocess, logging, time, threading, json, re
+import os, sys, subprocess, logging, time, threading, json, re, asyncio
 from pathlib import Path
-from typing import Optional
+from typing import Optional, AsyncGenerator
 import requests as _req
 
 # Load vault secrets before any API client initialization
@@ -29,7 +29,8 @@ try:
     _HAS_OPENAI = True
 except ImportError:
     _HAS_OPENAI = False
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import FastAPI, HTTPException, Header, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 log = logging.getLogger(__name__)
@@ -129,6 +130,15 @@ def _compose_progress(title: str, steps: list, footer: str = "") -> str:
     return "\n".join(parts)
 
 
+def _resolve_tenant_safe(chat_id: int) -> str:
+    """Devuelve el tenant del chat_id. Falla silencioso a 'reamerica'."""
+    try:
+        from services.tenants import resolve_tenant  # type: ignore
+        return resolve_tenant(chat_id) or "reamerica"
+    except Exception:
+        return "reamerica"
+
+
 def _run_claude_cli_streaming(prompt: str, chat_id: int, task_id: str) -> dict:
     """
     Lanza Claude Code CLI con --output-format stream-json y postea/edita
@@ -139,6 +149,12 @@ def _run_claude_cli_streaming(prompt: str, chat_id: int, task_id: str) -> dict:
     ak = os.environ.get("ANTHROPIC_KEY") or os.environ.get("ANTHROPIC_API_KEY", "")
     if ak:
         env["ANTHROPIC_API_KEY"] = ak
+    # Env para los hooks .claude/hooks/*.py — así saben en qué tenant/chat
+    # indexar el RAG y a quién mandarle el resumen de session-end.
+    env["CUKI_TENANT"] = _resolve_tenant_safe(chat_id)
+    env["CUKI_CHAT_ID"] = str(chat_id or 0)
+    env["CUKI_TASK_ID"] = task_id or ""
+    env["REPO_PATH"] = REPO_PATH
 
     title = "⚡ *Agent Worker — Ejecutando*"
     steps: list = []
@@ -417,24 +433,176 @@ def codex_summarize(user_text: str, raw_summary: str, modified_files: list, git_
     return out or raw_summary
 
 
+# ── SPARC-lite ─────────────────────────────────────────────────────────────
+# Para briefs grandes (>~500 tokens), insertamos dos fases previas al exec:
+# Spec (Haiku: qué hay que lograr) → Arch (Haiku: qué archivos/cambios).
+# Post-exec, si el diff es grande, corre un Review (Opus).
+# Los artifacts quedan en `.sparc/<task_id>/` dentro del repo para auditoría.
+
+SPARC_TOKEN_THRESHOLD = int(os.environ.get("SPARC_THRESHOLD_TOKENS", "500"))
+SPARC_REVIEW_DIFF_LINES = int(os.environ.get("SPARC_REVIEW_LINES", "300"))
+SPARC_MODEL_SPEC = os.environ.get("SPARC_MODEL_SPEC", "claude-haiku-4-5-20251001")
+SPARC_MODEL_ARCH = os.environ.get("SPARC_MODEL_ARCH", "claude-haiku-4-5-20251001")
+SPARC_MODEL_REVIEW = os.environ.get("SPARC_MODEL_REVIEW", "claude-opus-4-7")
+
+
+def _approx_tokens(text: str) -> int:
+    """Heurística chars/4. Rápida y suficiente para decidir si activar SPARC."""
+    return max(1, len(text or "") // 4)
+
+
+_anthropic_client = None
+def _anthropic_client_lazy():
+    global _anthropic_client
+    if _anthropic_client is None and ANTHROPIC_KEY:
+        _anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+    return _anthropic_client
+
+
+def _claude_api_call(model: str, system: str, user: str, max_tokens: int = 2000) -> str:
+    """Llamada simple a la API de Anthropic (no CLI). Usado para las fases
+    Spec/Arch/Review. Retorna "" si falla."""
+    cli = _anthropic_client_lazy()
+    if not cli:
+        return ""
+    try:
+        resp = cli.messages.create(
+            model=model,
+            max_tokens=max_tokens,
+            system=system,
+            messages=[{"role": "user", "content": user}],
+        )
+        out = ""
+        for block in resp.content:
+            if hasattr(block, "text"):
+                out += block.text
+        return out.strip()
+    except Exception as e:
+        log.warning(f"[sparc] claude api {model} fail: {e}")
+        return ""
+
+
+def _sparc_dir(task_id: str) -> Path:
+    d = Path(REPO_PATH) / ".sparc" / (task_id or "unknown")
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _sparc_spec(user_text: str, task_id: str) -> str:
+    system = (
+        "Sos un analista técnico. Dado el pedido informal de un usuario, producí un "
+        "Specification breve y accionable: qué problema hay que resolver, qué entradas/"
+        "salidas, qué criterios de aceptación, qué NO está en scope. Markdown, 6-12 "
+        "bullets máximo, sin preámbulo."
+    )
+    spec = _claude_api_call(SPARC_MODEL_SPEC, system, user_text, max_tokens=1200)
+    if spec:
+        try:
+            (_sparc_dir(task_id) / "spec.md").write_text(spec, encoding="utf-8")
+        except Exception as e:
+            log.warning(f"[sparc] spec save fail: {e}")
+    return spec
+
+
+def _sparc_arch(spec: str, user_text: str, task_id: str) -> str:
+    system = (
+        "Sos un architect senior del repo cukinator-bot (Python/FastAPI, Supabase, "
+        "multi-tenant). Dado el Spec, producí un Architecture plan: qué archivos "
+        "concretos del repo hay que leer, qué archivos nuevos crear, qué servicios/"
+        "tools del repo reutilizar, riesgos y dependencias. Markdown, orientado a "
+        "que un ejecutor (Claude Code CLI) sepa por dónde arrancar. Sin código."
+    )
+    user = f"Pedido original: {user_text}\n\nSpec:\n{spec}"
+    arch = _claude_api_call(SPARC_MODEL_ARCH, system, user, max_tokens=1500)
+    if arch:
+        try:
+            (_sparc_dir(task_id) / "arch.md").write_text(arch, encoding="utf-8")
+        except Exception as e:
+            log.warning(f"[sparc] arch save fail: {e}")
+    return arch
+
+
+def _sparc_review(user_text: str, spec: str, arch: str, diff_text: str, task_id: str) -> str:
+    system = (
+        "Sos un code reviewer senior. Revisá el diff contra el Spec/Arch originales. "
+        "Devolvé: 1) qué del spec quedó cubierto y qué no, 2) riesgos concretos "
+        "(regresiones, seguridad, edge cases), 3) 3-5 acciones priorizadas. Markdown, "
+        "directo, sin rodeos. Si el diff cumple, decílo corto."
+    )
+    user = (
+        f"Pedido: {user_text}\n\n# Spec\n{spec[:3000]}\n\n# Arch\n{arch[:3000]}\n\n"
+        f"# Diff\n```diff\n{diff_text[:12000]}\n```"
+    )
+    review = _claude_api_call(SPARC_MODEL_REVIEW, system, user, max_tokens=2000)
+    if review:
+        try:
+            (_sparc_dir(task_id) / "review.md").write_text(review, encoding="utf-8")
+        except Exception as e:
+            log.warning(f"[sparc] review save fail: {e}")
+    return review
+
+
+def _git_diff_staged_and_working() -> str:
+    try:
+        r = subprocess.run(
+            ["git", "diff", "HEAD"],
+            capture_output=True, text=True, timeout=20, cwd=REPO_PATH,
+        )
+        return r.stdout or ""
+    except Exception as e:
+        log.warning(f"[sparc] git diff fail: {e}")
+        return ""
+
+
 def run_agent(task):
-    """Pipeline: Codex planner -> Claude Code CLI executor -> Codex summarizer."""
+    """Pipeline: Codex planner -> (SPARC-lite si brief grande) -> Claude Code CLI -> Review opcional -> Codex summarizer."""
     start = time.time()
     modified_files, git_info, errors = [], {}, []
+    sparc_spec_md = ""
+    sparc_arch_md = ""
+    sparc_review_md = ""
+    sparc_active = False
 
     # Paso 1: plan + mensaje inicial de "planificando"
     _tg_plan_id = _tg_send(task.chat_id, "🧠 *Agent Worker — Planificando*\n_armando prompt técnico con Codex..._")
     log.info(f"[{task.task_id}] codex_plan: building prompt...")
     enhanced = codex_plan(task.user_text)
     log.info(f"[{task.task_id}] codex_plan OK ({len(enhanced)} chars)")
-    if _tg_plan_id:
-        _tg_edit(
-            task.chat_id, _tg_plan_id,
-            f"🧠 *Planificado* · _{len(enhanced)} chars_\n└─ paso al executor",
-        )
+
+    # Paso 1b: SPARC-lite si el brief es grande (>500 tokens aprox)
+    combined_tokens = _approx_tokens(task.user_text) + _approx_tokens(enhanced)
+    if combined_tokens >= SPARC_TOKEN_THRESHOLD:
+        sparc_active = True
+        log.info(f"[{task.task_id}] SPARC-lite ON (~{combined_tokens} tokens)")
+        if _tg_plan_id:
+            _tg_edit(task.chat_id, _tg_plan_id,
+                     f"🧠 *Brief grande* (~{combined_tokens} tokens)\n└─ SPARC-lite: generando Spec…")
+        sparc_spec_md = _sparc_spec(task.user_text, task.task_id)
+        if sparc_spec_md and _tg_plan_id:
+            _tg_edit(task.chat_id, _tg_plan_id,
+                     f"🧠 *SPARC* · Spec OK ({len(sparc_spec_md)} chars)\n└─ generando Arch…")
+        sparc_arch_md = _sparc_arch(sparc_spec_md, task.user_text, task.task_id)
+        if sparc_arch_md and _tg_plan_id:
+            _tg_edit(task.chat_id, _tg_plan_id,
+                     f"🧠 *SPARC* · Spec+Arch OK\n└─ paso al executor")
+        # Enriquecer el prompt del executor con Spec+Arch
+        if sparc_spec_md or sparc_arch_md:
+            enhanced = (
+                f"{enhanced}\n\n"
+                f"── SPEC ──\n{sparc_spec_md}\n\n"
+                f"── ARCH ──\n{sparc_arch_md}\n\n"
+                f"Seguí el Spec y la Arch. Si detectás que algo del Spec no se puede "
+                f"cumplir, decílo explícitamente al final en vez de ignorarlo."
+            )
+    else:
+        if _tg_plan_id:
+            _tg_edit(
+                task.chat_id, _tg_plan_id,
+                f"🧠 *Planificado* · _{len(enhanced)} chars_\n└─ paso al executor",
+            )
 
     # Paso 2: executor con streaming en vivo
-    log.info(f"[{task.task_id}] Launching Claude Code CLI with stream...")
+    log.info(f"[{task.task_id}] Launching Claude Code CLI with stream (sparc={sparc_active})...")
     stream_res = _run_claude_cli_streaming(enhanced, task.chat_id, task.task_id)
     raw_output = stream_res.get("final_text", "") or stream_res.get("stdout_raw", "")
     errors.extend(stream_res.get("errors", []))
@@ -457,6 +625,22 @@ def run_agent(task):
     except Exception as e:
         log.warning(f"git status check failed: {e}")
 
+    # Paso 2b: SPARC Review si el diff es sustancioso y SPARC está activo
+    if sparc_active and modified_files:
+        diff_text = _git_diff_staged_and_working()
+        diff_lines = diff_text.count("\n")
+        if diff_lines >= SPARC_REVIEW_DIFF_LINES:
+            log.info(f"[{task.task_id}] SPARC Review ON (diff {diff_lines} líneas, modelo={SPARC_MODEL_REVIEW})")
+            _tg_send(task.chat_id,
+                     f"🔎 *SPARC Review* — diff {diff_lines} líneas, corriendo Opus…")
+            sparc_review_md = _sparc_review(
+                task.user_text, sparc_spec_md, sparc_arch_md, diff_text, task.task_id,
+            )
+            if sparc_review_md:
+                # Mandar el review como mensaje separado — el usuario lo puede leer
+                # antes del summary final de Codex.
+                _tg_send(task.chat_id, f"🔎 *Review del diff*\n\n{sparc_review_md[:3500]}")
+
     log.info(f"[{task.task_id}] codex_summarize...")
     final_summary = codex_summarize(task.user_text, raw_output or "(sin output)", modified_files, git_info)
 
@@ -469,7 +653,7 @@ def run_agent(task):
         status="ok" if not errors else ("partial" if raw_output else "error"),
         summary=final_summary,
         modified_files=modified_files,
-        git_info=git_info,
+        git_info={**git_info, "sparc": sparc_active, "sparc_review": bool(sparc_review_md)},
         errors=errors,
         duration_s=round(time.time() - start, 1)
     )
@@ -530,6 +714,244 @@ def worker_status():
         "repo_path": REPO_PATH,
         "repo_exists": os.path.exists(REPO_PATH),
     }
+
+
+@app.get("/context")
+def repo_context(limit: int = 20):
+    """Snapshot del repo cukinator-bot: branch, head, log reciente, estado.
+    Usado por el panel web para alimentar el system prompt del Cukinator Bot
+    (y que pueda responder qué se vino trabajando aunque la sesión arranque vacía).
+    """
+    def _run(cmd: str, timeout: int = 8) -> str:
+        try:
+            r = subprocess.run(cmd, shell=True, capture_output=True, text=True,
+                               timeout=timeout, cwd=REPO_PATH)
+            return (r.stdout or "").strip()
+        except Exception as e:
+            return f"(error: {e})"
+
+    return {
+        "repo": REPO_PATH,
+        "branch": _run("git rev-parse --abbrev-ref HEAD"),
+        "head": _run("git rev-parse --short HEAD"),
+        "head_full": _run("git rev-parse HEAD"),
+        "head_msg": _run("git log -1 --pretty=%s"),
+        "head_date": _run("git log -1 --pretty=%ci"),
+        "log": _run(f"git log --oneline -{max(1, min(limit, 100))}"),
+        "log_detailed": _run(
+            f"git log -{max(1, min(limit, 30))} --pretty=format:'%h|%ci|%an|%s' "
+        ),
+        "status_short": _run("git status -s"),
+        "files_changed_30d": _run(
+            "git log --since='30 days ago' --pretty=format: --name-only | "
+            "sort | uniq -c | sort -rn | head -20"
+        ),
+        "branches": _run("git branch -a --sort=-committerdate | head -10"),
+    }
+
+
+# ── /task/stream ─────────────────────────────────────────────────────────
+# Endpoint SSE para que el panel web (cukinator-web) consuma el progreso del
+# Claude Code CLI en vivo, igual que se ve en VS Code.
+# Eventos enviados (cada uno como `data: {json}\n\n`):
+#   {type: "status",    data: {phase, msg}}
+#   {type: "plan",      data: {enhanced_prompt, tokens}}      (tras Codex planner)
+#   {type: "claude",    data: <json crudo del CLI>}           (tool_use, text, etc.)
+#   {type: "git",       data: {modified_files, commit, branch}}
+#   {type: "summary",   data: {text}}                         (resumen Codex)
+#   {type: "done",      data: {duration_s, status, errors}}
+#   {type: "error",     data: {message}}
+
+class StreamTask(BaseModel):
+    task_id: str
+    user_text: str
+    chat_id: int = 0          # 0 = sin Telegram, solo SSE
+    skip_codex_plan: bool = False
+    skip_codex_summary: bool = False
+
+
+def _sse(event_type: str, data) -> bytes:
+    payload = json.dumps({"type": event_type, "data": data}, ensure_ascii=False)
+    return f"data: {payload}\n\n".encode("utf-8")
+
+
+async def _stream_task(task: StreamTask, request: Request) -> AsyncGenerator[bytes, None]:
+    started = time.time()
+    errors: list = []
+    modified_files: list = []
+    git_info: dict = {}
+    summary_text: str = ""
+
+    yield _sse("status", {"phase": "starting", "msg": "Iniciando agente"})
+
+    # 1) Codex planner (opcional)
+    enhanced = task.user_text
+    if not task.skip_codex_plan:
+        yield _sse("status", {"phase": "planning", "msg": "Codex armando plan técnico (gpt-5-codex)"})
+        loop = asyncio.get_event_loop()
+        enhanced = await loop.run_in_executor(None, codex_plan, task.user_text)
+        yield _sse("plan", {"enhanced_prompt": enhanced[:4000], "len": len(enhanced)})
+
+    # 2) Pull repo
+    yield _sse("status", {"phase": "git_pull", "msg": "git fetch + checkout main"})
+    try:
+        await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: subprocess.run(
+                "git fetch origin && git checkout main && git pull origin main",
+                shell=True, cwd=REPO_PATH, timeout=30, capture_output=True,
+            ),
+        )
+    except Exception as e:
+        errors.append(f"git pull: {e}")
+
+    # 3) Spawn claude CLI con stream-json
+    yield _sse("status", {"phase": "executing", "msg": "Claude Code CLI ejecutando con tools reales"})
+
+    env = dict(os.environ)
+    ak = os.environ.get("ANTHROPIC_KEY") or os.environ.get("ANTHROPIC_API_KEY", "")
+    if ak:
+        env["ANTHROPIC_API_KEY"] = ak
+    env["CUKI_TENANT"] = _resolve_tenant_safe(task.chat_id)
+    env["CUKI_CHAT_ID"] = str(task.chat_id or 0)
+    env["CUKI_TASK_ID"] = task.task_id or ""
+    env["REPO_PATH"] = REPO_PATH
+
+    proc = None
+    final_text = ""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "claude", "-p", enhanced,
+            "--output-format", "stream-json", "--verbose",
+            "--dangerously-skip-permissions",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=REPO_PATH,
+            env=env,
+        )
+    except FileNotFoundError:
+        errors.append("claude CLI no encontrado en PATH")
+        yield _sse("error", {"message": "Claude CLI no instalado en el VPS"})
+        yield _sse("done", {"duration_s": round(time.time() - started, 1),
+                            "status": "error", "errors": errors})
+        return
+
+    # Stream stdout
+    assert proc.stdout is not None
+    while True:
+        line = await proc.stdout.readline()
+        if not line:
+            break
+        s = line.decode("utf-8", errors="replace").strip()
+        if not s:
+            continue
+        try:
+            evt = json.loads(s)
+        except json.JSONDecodeError:
+            continue
+        # Capturar texto final
+        if evt.get("type") == "assistant":
+            for block in (evt.get("message") or {}).get("content", []) or []:
+                if block.get("type") == "text" and block.get("text"):
+                    final_text = block["text"]
+        if evt.get("type") == "result":
+            rt = evt.get("result") or evt.get("content") or ""
+            if rt:
+                final_text = rt if isinstance(rt, str) else str(rt)
+        yield _sse("claude", evt)
+        # Si el cliente cierra la conexión, abortamos el subprocess
+        if await request.is_disconnected():
+            log.info(f"[{task.task_id}] client disconnected, killing claude CLI")
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+            return
+
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=10)
+    except asyncio.TimeoutError:
+        try: proc.kill()
+        except Exception: pass
+
+    if proc.returncode and proc.returncode != 0:
+        try:
+            stderr_raw = (await proc.stderr.read()).decode("utf-8", errors="replace") if proc.stderr else ""
+        except Exception:
+            stderr_raw = ""
+        errors.append(f"claude rc={proc.returncode}: {stderr_raw[:300]}")
+
+    # 4) Git status / commit info
+    yield _sse("status", {"phase": "git_check", "msg": "Detectando cambios"})
+    try:
+        diff = subprocess.run(["git", "diff", "--name-only", "HEAD"],
+                              capture_output=True, text=True, timeout=10, cwd=REPO_PATH)
+        if diff.stdout.strip():
+            modified_files = diff.stdout.strip().splitlines()
+        log_r = subprocess.run(["git", "log", "--oneline", "-1"],
+                               capture_output=True, text=True, timeout=10, cwd=REPO_PATH)
+        if log_r.stdout:
+            git_info["commit"] = log_r.stdout.strip()
+        branch_r = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                                  capture_output=True, text=True, timeout=10, cwd=REPO_PATH)
+        if branch_r.stdout:
+            git_info["branch"] = branch_r.stdout.strip()
+    except Exception as e:
+        errors.append(f"git_check: {e}")
+
+    yield _sse("git", {"modified_files": modified_files, **git_info})
+
+    # 5) Codex summary (opcional)
+    if not task.skip_codex_summary:
+        yield _sse("status", {"phase": "summarizing", "msg": "Codex resumiendo en criollo"})
+        loop = asyncio.get_event_loop()
+        summary_text = await loop.run_in_executor(
+            None,
+            codex_summarize,
+            task.user_text, final_text or "(sin output)", modified_files, git_info,
+        )
+        yield _sse("summary", {"text": summary_text})
+
+    yield _sse("done", {
+        "duration_s": round(time.time() - started, 1),
+        "status": "ok" if not errors else ("partial" if (final_text or modified_files) else "error"),
+        "errors": errors,
+        "task_id": task.task_id,
+    })
+
+
+@app.post("/task/stream")
+async def task_stream(task: StreamTask, request: Request,
+                       x_worker_secret: str = Header(None)):
+    if x_worker_secret != WORKER_SECRET:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    global _current_task
+    if not _repo_lock.acquire(blocking=False):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Worker ocupado: {_current_task}",
+        )
+    _current_task = {"task_id": task.task_id, "started_at": time.time(), "stream": True}
+
+    async def generator():
+        global _current_task
+        try:
+            async for chunk in _stream_task(task, request):
+                yield chunk
+        finally:
+            _repo_lock.release()
+            _current_task = None
+
+    return StreamingResponse(
+        generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",   # disable nginx buffering for SSE
+        },
+    )
 
 
 if __name__ == "__main__":
