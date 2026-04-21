@@ -2016,10 +2016,16 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
     _always_on = {"get_time", "get_weather"}  # utility universales, nunca filtrar
 
     # Tools gateadas por intent: solo se exponen al LLM si el intent matchea.
-    # Decisión del user: Salesforce SOLO desde el agente reaseguros.
+    # Decisión del user: Salesforce y Outlook (Reamerica) SOLO desde reaseguros.
+    # Mail personal (gmail_*) sigue disponible en otros intents (no se mezclan
+    # — feedback_email_por_tenant.md).
     INTENT_GATED_TOOLS = {
         "sf_consultar":           {"reinsurance"},
         "sf_broker_performance":  {"reinsurance"},
+        "outlook_inbox":          {"reinsurance"},
+        "outlook_leer":           {"reinsurance"},
+        "outlook_buscar":         {"reinsurance"},
+        "outlook_enviar":         {"reinsurance"},
     }
 
     tools_activos = [
