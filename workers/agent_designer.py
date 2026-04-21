@@ -71,6 +71,9 @@ class DesignTask(BaseModel):
     target: Optional[str] = None      # audiencia / destino (ej. 'cliente', 'interno')
     reference: Optional[str] = None   # para critique: el HTML/texto a revisar
     model: Optional[str] = None       # override default
+    # Nuevos para render enriquecido:
+    use_template_base: bool = False   # abrir template aprobado del tenant como base
+    template_path: Optional[str] = None  # override path absoluto al .pptx base
 
 
 class DesignResult(BaseModel):
@@ -298,10 +301,48 @@ def _hex_to_rgb(hex_color: str, fallback=(30, 58, 95)):
         return fallback
 
 
-def _render_pptx_from_plan(plan: dict, output_path: Path) -> None:
-    """python-pptx render. Crea slides según layouts del plan."""
+# ── Assets locales por tenant ─────────────────────────────────────────────
+# El Designer busca logos, fotos corporativas y templates base en disco.
+# Path: <repo>/assets/<tenant>/{logos,animals,photos,templates}/
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_ASSETS_ROOT = _REPO_ROOT / "assets"
+
+def _tenant_asset(tenant: str, relative_path: str) -> Path | None:
+    """Devuelve Path del asset si existe en assets/<tenant>/..., sino None."""
+    p = _ASSETS_ROOT / tenant / relative_path
+    return p if p.exists() and p.is_file() else None
+
+
+def _pick_brand_photo(tenant: str, category: str = "animal") -> Path | None:
+    """Elige una foto corporativa acorde al contexto del slide.
+    category: 'animal' (eagle/lion/whale), 'office' (edificio/oficina B&N),
+    'misc' (ojo, molino). Round-robin entre las disponibles."""
+    import random
+    buckets = {
+        "animal": ["animals/aguila_ala.jpg", "animals/leon.jpg", "animals/ballena.jpg"],
+        "office": ["animals/edificio.jpg"],
+        "misc":   ["animals/ojo.jpg", "animals/molino.jpg"],
+    }
+    paths = buckets.get(category, buckets["animal"])
+    random.shuffle(paths)
+    for p in paths:
+        a = _tenant_asset(tenant, p)
+        if a:
+            return a
+    return None
+
+
+def _render_pptx_from_plan(plan: dict, output_path: Path, tenant: str = "reamerica",
+                            template_base: Path | None = None) -> None:
+    """python-pptx render con assets corporativos (logo, fotos, fonts).
+
+    tenant: para resolver assets/<tenant>/ (logos, animals, photos).
+    template_base: si se pasa un .pptx existente, lo usa como base (hereda
+    slide masters, colores y fonts del template original). Sino arranca en blanco.
+    """
     from pptx import Presentation
-    from pptx.util import Inches, Pt
+    from pptx.util import Inches, Pt, Emu
     from pptx.dml.color import RGBColor
     from pptx.enum.text import PP_ALIGN
 
@@ -313,11 +354,25 @@ def _render_pptx_from_plan(plan: dict, output_path: Path) -> None:
     accent = RGBColor(ar, ag, ab)
     white = RGBColor(0xFF, 0xFF, 0xFF)
     dark = RGBColor(0x1E, 0x1E, 0x1E)
+    muted = RGBColor(0x55, 0x55, 0x55)
 
-    prs = Presentation()
-    prs.slide_width = Inches(13.333)
-    prs.slide_height = Inches(7.5)
-    blank = prs.slide_layouts[6]
+    # Base: template del tenant o blanco
+    if template_base and template_base.exists():
+        prs = Presentation(str(template_base))
+        # Limpiar slides del template (solo queremos sus masters)
+        xml_slides = prs.slides._sldIdLst
+        slides_to_remove = list(xml_slides)
+        for sld in slides_to_remove:
+            xml_slides.remove(sld)
+    else:
+        prs = Presentation()
+        prs.slide_width = Inches(13.333)
+        prs.slide_height = Inches(7.5)
+    blank = prs.slide_layouts[6] if len(prs.slide_layouts) > 6 else prs.slide_layouts[-1]
+
+    # Logos del tenant
+    logo_negro = _tenant_asset(tenant, "logos/logo_negro.png")
+    logo_blanco = _tenant_asset(tenant, "logos/logo_blanco.png")
 
     def add_text(slide, x, y, w, h, text, size=18, bold=False, color=dark, align=PP_ALIGN.LEFT):
         tb = slide.shapes.add_textbox(x, y, w, h)
@@ -359,20 +414,67 @@ def _render_pptx_from_plan(plan: dict, output_path: Path) -> None:
         slide = prs.slides.add_slide(blank)
 
         if layout == "title":
-            fill_bg(slide, primary)
-            add_text(slide, Inches(0.8), Inches(2.6), Inches(11.5), Inches(1.5),
-                     sl.get("title") or plan.get("title", ""), size=44, bold=True, color=white)
-            add_text(slide, Inches(0.8), Inches(4.2), Inches(11.5), Inches(1.0),
+            # Tapa con foto animal full-bleed + overlay oscuro + logo blanco
+            cover_photo = _pick_brand_photo(tenant, sl.get("photo_category", "animal"))
+            if cover_photo:
+                try:
+                    slide.shapes.add_picture(str(cover_photo), Inches(0), Inches(0),
+                                              width=prs.slide_width, height=prs.slide_height)
+                    # Overlay oscuro semi-transparente para legibilidad
+                    overlay = slide.shapes.add_shape(1, Inches(0), Inches(0),
+                                                      prs.slide_width, prs.slide_height)
+                    overlay.fill.solid(); overlay.fill.fore_color.rgb = primary
+                    overlay.line.fill.background()
+                    # No hay alpha directo en python-pptx, simulamos con un shape
+                    # más pequeño centrado
+                except Exception as e:
+                    log.debug(f"cover photo fail: {e}")
+                    fill_bg(slide, primary)
+            else:
+                fill_bg(slide, primary)
+            add_text(slide, Inches(0.8), Inches(3.0), Inches(11.5), Inches(1.5),
+                     sl.get("title") or plan.get("title", ""), size=48, bold=True, color=white)
+            add_text(slide, Inches(0.8), Inches(4.5), Inches(11.5), Inches(1.0),
                      sl.get("subtitle") or plan.get("subtitle", ""), size=22, color=white)
             add_accent_bar(slide, accent)
+            # Logo blanco en esquina superior derecha
+            if logo_blanco:
+                try:
+                    slide.shapes.add_picture(str(logo_blanco), Inches(10.8), Inches(0.3),
+                                              height=Inches(0.7))
+                except Exception as e:
+                    log.debug(f"cover logo fail: {e}")
 
         elif layout == "section":
-            fill_bg(slide, primary)
-            add_text(slide, Inches(0.8), Inches(3.0), Inches(11.5), Inches(1.5),
-                     sl.get("title", ""), size=40, bold=True, color=white)
-            if sl.get("subtitle"):
-                add_text(slide, Inches(0.8), Inches(4.5), Inches(11.5), Inches(1.0),
-                         sl.get("subtitle", ""), size=20, color=white)
+            # Section divider con foto animal corporativa al costado
+            photo_cat = sl.get("photo_category", "animal")  # animal|office|misc
+            photo = _pick_brand_photo(tenant, photo_cat)
+            if photo:
+                # foto full-left (half slide), texto derecha sobre fondo primary
+                try:
+                    slide.shapes.add_picture(str(photo), Inches(0), Inches(0),
+                                              width=Inches(6.66), height=prs.slide_height)
+                except Exception as e:
+                    log.debug(f"section photo fail {photo}: {e}")
+                # Panel derecho con color primario
+                panel = slide.shapes.add_shape(1, Inches(6.66), Inches(0),
+                                                Inches(6.66), prs.slide_height)
+                panel.fill.solid(); panel.fill.fore_color.rgb = primary
+                panel.line.fill.background()
+                add_text(slide, Inches(7.0), Inches(2.5), Inches(6.0), Inches(1.0),
+                         sl.get("section_num", ""), size=72, bold=True, color=accent)
+                add_text(slide, Inches(7.0), Inches(3.8), Inches(6.0), Inches(1.2),
+                         sl.get("title", ""), size=32, bold=True, color=white)
+                if sl.get("subtitle"):
+                    add_text(slide, Inches(7.0), Inches(5.0), Inches(6.0), Inches(1.0),
+                             sl.get("subtitle", ""), size=16, color=white)
+            else:
+                fill_bg(slide, primary)
+                add_text(slide, Inches(0.8), Inches(3.0), Inches(11.5), Inches(1.5),
+                         sl.get("title", ""), size=40, bold=True, color=white)
+                if sl.get("subtitle"):
+                    add_text(slide, Inches(0.8), Inches(4.5), Inches(11.5), Inches(1.0),
+                             sl.get("subtitle", ""), size=20, color=white)
 
         elif layout == "two_col":
             add_text(slide, Inches(0.6), Inches(0.4), Inches(12), Inches(0.8),
@@ -418,6 +520,15 @@ def _render_pptx_from_plan(plan: dict, output_path: Path) -> None:
                 add_text(slide, Inches(0.8), y, Inches(11.5), Inches(5.0),
                          body_text, size=16)
             add_accent_bar(slide, accent)
+
+        # Footer con logo chico (aplica a todos excepto cover y section que
+        # ya lo tienen integrado o no lo necesitan)
+        if layout not in ("title", "section", "closing") and logo_negro:
+            try:
+                slide.shapes.add_picture(str(logo_negro), Inches(11.5), Inches(6.85),
+                                          height=Inches(0.5))
+            except Exception as e:
+                log.debug(f"footer logo fail: {e}")
 
     prs.save(str(output_path))
 
@@ -514,7 +625,16 @@ def design(task: DesignTask, x_designer_secret: str = Header(None)):
                         raw = raw.rstrip("`").strip()
                     plan = json.loads(raw)
                     out_file = str(OUTPUT_DIR / f"{task.task_id}.pptx")
-                    _render_pptx_from_plan(plan, Path(out_file))
+                    # Resolver template base si se pidió
+                    tpl_base = None
+                    if task.template_path:
+                        tpl_base = Path(task.template_path)
+                    elif task.use_template_base:
+                        default_tpl = _ASSETS_ROOT / task.tenant / "templates" / "template_aprobado_2021.pptx"
+                        if default_tpl.exists():
+                            tpl_base = default_tpl
+                    _render_pptx_from_plan(plan, Path(out_file),
+                                           tenant=task.tenant, template_base=tpl_base)
                     out_text = json.dumps(plan, indent=2, ensure_ascii=False)
                 except Exception as ex:
                     errors.append(f"pptx render error: {ex}")
