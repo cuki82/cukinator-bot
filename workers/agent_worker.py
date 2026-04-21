@@ -427,9 +427,9 @@ def codex_summarize(user_text: str, raw_summary: str, modified_files: list, git_
         "✅ *Qué se hizo* — explicá qué cambios concretos se implementaron, en criollo\n"
         "⏳ *Qué falta* — si quedó algo pendiente del lado del agente, listalo\n"
         "🙋 *Qué necesito de vos* — si hay decisiones o info que el agente necesita del usuario para continuar\n"
-        "Máximo 1500 caracteres. Sin preámbulos. Arrancá directo con la primera sección."
+        "Máximo 3500 caracteres. Sin preámbulos. Arrancá directo con la primera sección."
     )
-    out = _openai_responses(system, context, max_tokens=700)
+    out = _openai_responses(system, context, max_tokens=2000)
     return out or raw_summary
 
 
