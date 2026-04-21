@@ -9,6 +9,16 @@ log = logging.getLogger(__name__)
 
 # ── Keywords por intent ────────────────────────────────────────────────────────
 
+# Patrones de DISEÑO que NO deben caer en coding aunque mencionen palabras
+# técnicas. Ejemplos: "armame una PPT con todo el stack", "generame un PDF
+# corporativo", "diseñá un mockup HTML del workspace". Esto va al LLM bot
+# (intent=conversational) que tiene la tool generar_diseno disponible.
+_DESIGN_INTENT_PATTERNS = [
+    r"\b(?:arm[aá]|gener[aá]|hac[eé]|cre[aá]|prepar[aá]|diseñ[aá]|necesito|quiero)(?:me|le|nos)?\s+(?:un[ao]?|el|la|los|las|el?\s+)?\s*(?:ppt|pptx|presentaci[oó]n|pdf|html|mockup|landing|email|template|diseño|pieza|brochure|flyer|catalogo|cat[aá]logo)\b",
+    r"\b(?:ppt|pptx|presentaci[oó]n)\s+(?:corporativ|formal|para|sobre|de|del)\b",
+    r"\b(?:flyer|brochure|landing|mockup|catalogo|cat[aá]logo)\s+(?:para|de|del|sobre)\b",
+]
+
 _PATTERNS = {
     "coding": [
         # Modificaciones de codigo
@@ -186,8 +196,20 @@ def classify(text: str, use_llm_fallback: bool = True) -> str:
     1. Keyword regex (zero latencia, zero costo) — cubre la gran mayoría.
     2. Si regex dio 'conversational' PERO hay señales de ambigüedad, escala a
        Haiku 4.5 (~$0.0005, ~1s). Esto evita keywords genéricas que pueden
-       aplicar a múltiples dominios (ej. 'menú' = bot/astrología/reamerica)."""
+       aplicar a múltiples dominios (ej. 'menú' = bot/astrología/reamerica).
+
+    Override de DISEÑO: si el texto es claramente un pedido de PPT/PDF/HTML/
+    mockup/diseño, fuerza conversational (donde el LLM bot tiene la tool
+    generar_diseno disponible). Esto evita que palabras técnicas en el brief
+    ('stack', 'arquitectura', 'pipeline') ruteen al worker de coding por
+    error."""
     t = text.lower()
+
+    # Override de diseño — alta prioridad, antes del scoring de coding
+    for pat in _DESIGN_INTENT_PATTERNS:
+        if re.search(pat, t):
+            log.info(f"intent: design override → conversational (matched {pat[:40]!r})")
+            return "conversational"
 
     scores = {intent: 0 for intent in _PRIORITY}
     for intent, patterns in _PATTERNS.items():
