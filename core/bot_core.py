@@ -1124,8 +1124,11 @@ TOOLS = [
         "description": (
             "Calcula la carta del Retorno Solar del año (momento exacto en que el Sol regresa a "
             "su posición natal). Establece el 'tema del año' — el ascendente del SR, las casas, "
-            "los aspectos. Requiere perfil guardado y opcionalmente lugar_retorno (donde estuvo "
-            "la persona ese día — clave porque cambia las casas)."
+            "los aspectos. Requiere perfil guardado. "
+            "IMPORTANTE: antes de invocar esta tool, preguntale al user (a) PARA QUÉ AÑO lo quiere "
+            "y (b) DÓNDE va a estar (o estuvo) la persona el día del cumpleaños en ese año — el "
+            "lugar cambia las casas, por tanto cambia toda la carta. Si el user no sabe o dice "
+            "'lugar natal', llamá la tool sin lugar_retorno."
         ),
         "input_schema": {
             "type": "object",
@@ -1141,8 +1144,11 @@ TOOLS = [
         "name": "calcular_retorno_lunar",
         "description": (
             "Calcula el próximo Retorno Lunar desde fecha_ref (default ahora). Pasa cada ~27.3 días. "
-            "Establece el 'tema del mes'. Requiere perfil guardado. lugar_retorno: donde estuvo "
-            "la persona ese día."
+            "Establece el 'tema del mes'. Requiere perfil guardado. "
+            "IMPORTANTE: antes de invocar esta tool, preguntale al user (a) PARA QUÉ MES/AÑO lo quiere "
+            "(fecha_ref 'DD/MM/AAAA' como referencia — el retorno será el próximo a partir de ahí) "
+            "y (b) DÓNDE va a estar (o estuvo) la persona durante ese mes — cambia las casas. "
+            "Si el user no sabe o dice 'lugar natal', llamá la tool sin lugar_retorno."
         ),
         "input_schema": {
             "type": "object",
@@ -1809,6 +1815,7 @@ _SYS_ASTROLOGY = """ASTROLOGÍA:
 - Ver carta de alguien → astro_ver_perfil. Listar → astro_listar_perfiles. Borrar → astro_eliminar_perfil.
 - Tránsitos / "qué le pasa astrológicamente" → calcular_transitos (requiere perfil; si pregunta por sí mismo, asumí "Cuki" o el nombre propio guardado).
 - Retorno solar → calcular_retorno_solar. Retorno lunar → calcular_retorno_lunar.
+  REGLA OBLIGATORIA: antes de invocar estas tools SIEMPRE preguntá al user (1) el período — año para SR, mes/año para LR — y (2) dónde va a estar (o estuvo) la persona en ese período (ciudad, país). Cambia las casas y por tanto toda la carta. Si el user dice 'el mismo lugar natal' o 'no sé', pasá lugar_retorno vacío y aclaralo en la respuesta.
 - Análisis completo / integral → analisis_triple_capa.
 - "Modo pista" en rango de fechas → analisis_pista_rango. Si rango ≤5 días: texto al chat. Si >5: la tool devuelve "RANGO_LARGO: ..." → pedí formato con [BOTONES: 📄 PDF | 📱 Texto en bloques] y NO ejecutes hasta que elija. formato='pdf' adjunta el archivo. Después: [BOTONES: 💾 Guardar en el perfil de X | ❌ No guardar].
 - Tránsitos sobre solar/lunar → calcular_transitos con target="solar"|"lunar".
@@ -3478,6 +3485,131 @@ async def send_long_message(bot, chat_id: int, text: str, reply_to=None, chunk_s
                 else:
                     await bot.send_message(chat_id=chat_id, text=plain)
 
+def _parse_anio_solar(text: str):
+    """Parse año para retorno solar. Devuelve int o None."""
+    import datetime, re
+    t = (text or "").strip().lower()
+    if t in ("este año", "este ano", "actual", "hoy", "ahora"):
+        return datetime.datetime.utcnow().year
+    m = re.search(r"(19\d{2}|20\d{2}|21\d{2})", t)
+    return int(m.group(1)) if m else None
+
+
+_MESES_ES = {
+    "enero":1,"febrero":2,"marzo":3,"abril":4,"mayo":5,"junio":6,
+    "julio":7,"agosto":8,"setiembre":9,"septiembre":9,"octubre":10,
+    "noviembre":11,"diciembre":12,
+}
+
+
+def _parse_mes_anio_lunar(text: str):
+    """Parse mes/año para retorno lunar.
+    Devuelve tuple (ok, fecha_ref_str_or_None):
+      - (True, "DD/MM/AAAA") si pudo parsear fecha específica
+      - (True, None) si el user pidió 'este mes' (None = usa ahora)
+      - (False, None) si no se pudo interpretar
+    """
+    import re
+    t = (text or "").strip().lower()
+    if t in ("este mes", "actual", "hoy", "ahora", "proximo", "próximo", "el próximo", "el proximo"):
+        return True, None
+    m = re.match(r"\s*(\d{1,2})\s*[/\-]\s*(\d{4})\s*$", t)
+    if m:
+        mes, ano = int(m.group(1)), int(m.group(2))
+        if 1 <= mes <= 12:
+            return True, f"01/{mes:02d}/{ano}"
+    for k, v in _MESES_ES.items():
+        if k in t:
+            m2 = re.search(r"(19\d{2}|20\d{2}|21\d{2})", t)
+            if m2:
+                return True, f"01/{v:02d}/{int(m2.group(1))}"
+    return False, None
+
+
+async def _advance_astro_retorno(update: Update, context: ContextTypes.DEFAULT_TYPE, pending: dict) -> bool:
+    """Avanza el flujo conversacional de Retorno Solar/Lunar.
+    Lee el texto del user y pide el dato siguiente; cuando está todo completo,
+    muestra el menú de formato. Devuelve True si consumió el mensaje."""
+    capa   = pending["capa"]
+    nombre = pending["nombre"]
+    step   = pending["step"]
+    text   = (update.message.text or "").strip()
+
+    if step == "periodo":
+        if capa == "solar":
+            anio = _parse_anio_solar(text)
+            if anio is None:
+                await update.message.reply_text(
+                    "No pude leer el año. Mandame algo como '2026' o 'este año'. "
+                    "Si querés cancelar, escribí 'cancelar'."
+                )
+                return True
+            pending["anio"] = anio
+            periodo_show = f"año {anio}"
+        else:
+            ok, fecha_ref = _parse_mes_anio_lunar(text)
+            if not ok:
+                await update.message.reply_text(
+                    "No pude leer el mes/año. Mandame algo como '05/2026', 'mayo 2026' "
+                    "o 'este mes'. Si querés cancelar, escribí 'cancelar'."
+                )
+                return True
+            pending["fecha_ref"] = fecha_ref
+            periodo_show = f"desde {fecha_ref}" if fecha_ref else "próximo retorno desde hoy"
+
+        pending["step"] = "lugar"
+        pending["periodo_show"] = periodo_show
+        context.user_data["astro_retorno_pending"] = pending
+        quien = nombre.title()
+        await update.message.reply_text(
+            f"📅 OK, {periodo_show}.\n\n"
+            f"¿Y *dónde* va a estar (o estuvo) {quien} en ese período? "
+            f"Ciudad y país, ej: `Buenos Aires, Argentina`.\n"
+            f"_Escribí 'natal' o 'mismo' si fue el lugar de nacimiento._",
+            parse_mode="Markdown",
+        )
+        return True
+
+    if step == "lugar":
+        if text.lower() in ("natal", "mismo", "mismo lugar", "lugar natal", "igual", "ahí", "ahi", "lo mismo"):
+            lugar_retorno = None
+            lugar_show = "(lugar natal)"
+        else:
+            lugar_retorno = text
+            lugar_show = text
+
+        context.user_data["astro_retorno_params"] = {
+            "capa": capa,
+            "nombre": nombre,
+            "anio": pending.get("anio"),
+            "fecha_ref": pending.get("fecha_ref"),
+            "lugar_retorno": lugar_retorno,
+        }
+        context.user_data.pop("astro_retorno_pending", None)
+
+        capa_label = {"solar": "Solar (año)", "lunar": "Lunar (mes)"}[capa]
+        periodo_show = pending.get("periodo_show", "")
+        botones = [
+            [InlineKeyboardButton("📊 Técnico + explicación + gestalt (chat)", callback_data=f"astro:render:{capa}:tecexpl:{nombre}")],
+            [InlineKeyboardButton("💬 Explicación en criollo + gestalt (chat)", callback_data=f"astro:render:{capa}:expl:{nombre}")],
+            [InlineKeyboardButton("🔬 Solo técnico / data pura (chat)",         callback_data=f"astro:render:{capa}:tec:{nombre}")],
+            [InlineKeyboardButton("📄 PDF técnico",                             callback_data=f"astro:render:{capa}:pdf:{nombre}")],
+            [InlineKeyboardButton("📑 PDF técnico + interpretación + gestalt",  callback_data=f"astro:render:{capa}:pdfexpl:{nombre}")],
+            [InlineKeyboardButton("📖 PDF solo interpretación + gestalt",       callback_data=f"astro:render:{capa}:pdfonly:{nombre}")],
+            [InlineKeyboardButton("← Volver",                                   callback_data=f"astro:ver:{nombre}")],
+        ]
+        await update.message.reply_text(
+            f"*Ficha {capa_label} — {nombre.title()}*\n"
+            f"📅 {periodo_show}\n"
+            f"📍 {lugar_show}\n\n¿Cómo la querés?",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(botones),
+        )
+        return True
+
+    return False
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     import asyncio, io, threading, queue  # time ya está importado al top-level
     chat_id  = update.effective_chat.id
@@ -3506,6 +3638,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if msg_lower in ("biblioteca", "librería", "libreria", "knowledge base", "kb", "kb reaseguros"):
         await cmd_biblioteca(update, context)
         return
+
+    # Si hay un flujo de Retorno Solar/Lunar esperando período o lugar, consumir
+    # el mensaje acá ANTES de Claude — así no le gastamos tokens ni ensuciamos el
+    # historial con "2026" sueltos.
+    pending_ret = (context.user_data or {}).get("astro_retorno_pending")
+    if pending_ret:
+        if msg_lower in ("cancelar", "cancela", "cancel", "/cancel"):
+            context.user_data.pop("astro_retorno_pending", None)
+            await update.message.reply_text("Cancelado.")
+            return
+        if await _advance_astro_retorno(update, context, pending_ret):
+            return
 
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
@@ -4450,9 +4594,38 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif data.startswith("astro:fichacapa:"):
-        # astro:fichacapa:<capa>:<nombre> — al elegir capa, mostrar menú de formato
+        # astro:fichacapa:<capa>:<nombre> — al elegir capa, mostrar menú de formato.
+        # Para solar/lunar: antes del formato pedimos período + lugar (donde la persona
+        # estuvo/va a estar ese día — cambia las casas y por tanto toda la carta).
         parts = data.split(":", 3)
         capa, nombre = parts[2], parts[3]
+
+        if capa in ("solar", "lunar"):
+            # Reset params viejos y entrar al flujo conversacional
+            context.user_data.pop("astro_retorno_params", None)
+            context.user_data["astro_retorno_pending"] = {
+                "capa": capa, "nombre": nombre, "step": "periodo",
+            }
+            if capa == "solar":
+                prompt_txt = (
+                    f"☀️ *Retorno Solar — {nombre.title()}*\n\n"
+                    "¿Para qué *año*? (ej: `2026`, `2025`)\n"
+                    "_Podés escribir 'este año' para usar el año actual._"
+                )
+            else:
+                prompt_txt = (
+                    f"🌙 *Retorno Lunar — {nombre.title()}*\n\n"
+                    "¿Para qué *mes y año*? (ej: `05/2026`, `mayo 2026`)\n"
+                    "_Podés escribir 'este mes' para el próximo retorno desde hoy._"
+                )
+            await query.edit_message_text(
+                prompt_txt, parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("Cancelar", callback_data=f"astro:ver:{nombre}")
+                ]]),
+            )
+            return
+
         capa_label = {"natal": "Natal", "solar": "Solar (año)", "lunar": "Lunar (mes)"}.get(capa, capa)
         botones = [
             [InlineKeyboardButton("📊 Técnico + explicación + gestalt (chat)", callback_data=f"astro:render:{capa}:tecexpl:{nombre}")],
@@ -4499,16 +4672,28 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(chat_id=chat_id, text=f"No encontré carta de {nombre.title()}.")
             return
 
-        # Helper: calcular la carta correspondiente a la capa
+        # Helper: calcular la carta correspondiente a la capa.
+        # Para solar/lunar, tira de los params (anio/fecha_ref + lugar_retorno)
+        # que el user completó en el flujo conversacional previo al render.
         def _carta_por_capa():
             from modules import swiss_engine as e
             natal = e.calc_carta_completa(datos["fecha"], datos["hora"], datos["lugar"])
+            ret_params = (context.user_data or {}).get("astro_retorno_params") or {}
+            rp_ok = ret_params.get("nombre") == nombre and ret_params.get("capa") == capa
             if capa == "natal":
                 carta = natal
             elif capa == "solar":
-                carta = e.calc_retorno_solar(natal)
+                carta = e.calc_retorno_solar(
+                    natal,
+                    anio=ret_params.get("anio") if rp_ok else None,
+                    lugar_retorno=ret_params.get("lugar_retorno") if rp_ok else None,
+                )
             elif capa == "lunar":
-                carta = e.calc_retorno_lunar(natal)
+                carta = e.calc_retorno_lunar(
+                    natal,
+                    fecha_ref=ret_params.get("fecha_ref") if rp_ok else None,
+                    lugar_retorno=ret_params.get("lugar_retorno") if rp_ok else None,
+                )
             else:
                 carta = natal
             # Enriquecer con secciones técnicas si es natal (ficha completa)
