@@ -1,7 +1,8 @@
 """
-agents/intent_router.py — Clasificador de intenciones. Zero latencia, zero costo.
-Clasifica en 6 intents via keywords antes de llegar a cualquier LLM.
+agents/intent_router.py — Clasificador de intenciones v2.
+4 capas: keyword regex → embeddings → LLM con contexto → fallback.
 """
+import os
 import re
 import logging
 
@@ -68,7 +69,7 @@ _PATTERNS = {
         r"fijate en el vps", r"ver[ií]? en el servidor", r"chequea[rn]? el vps",
         r"corr[eé] en el vps", r"ejecut[aá] en el (?:vps|servidor)",
         r"ssh", r"docker", r"systemctl", r"systemd", r"container(?:es)?",
-        r"reinicia[rn]? (?:el )?(?:bot|servicio|worker|container)",
+        r"reinici[aá][rn]? (?:el )?(?:bot|servicio|worker|container)",
         r"restart (?:bot|service|worker|container)",
         r"ver logs?", r"mostr[aá] logs?", r"journalctl", r"tail -f",
         r"estado del (?:vps|servidor|bot)", r"status del", r"uptime",
@@ -189,28 +190,265 @@ def _classify_with_llm(text: str) -> str:
         return "conversational"
 
 
-# ── Clasificador ───────────────────────────────────────────────────────────────
+# ── Embeddings classifier (Layer B) ─────────────────────────────────────────────
+# Ejemplos canónicos por intent. Editar acá para cubrir nuevos casos sin
+# tocar regex. Cada ejemplo se embedea con text-embedding-3-small via LiteLLM
+# y se cachea en memoria.
 
-def classify(text: str, use_llm_fallback: bool = True) -> str:
-    """Clasifica el intent. 2 pasadas:
-    1. Keyword regex (zero latencia, zero costo) — cubre la gran mayoría.
-    2. Si regex dio 'conversational' PERO hay señales de ambigüedad, escala a
-       Haiku 4.5 (~$0.0005, ~1s). Esto evita keywords genéricas que pueden
-       aplicar a múltiples dominios (ej. 'menú' = bot/astrología/reamerica).
+INTENT_EXAMPLES: dict[str, list[str]] = {
+    "coding": [
+        "agregá un endpoint /ping al server",
+        "modificá el bot_core para que acepte X",
+        "fijate por qué el worker está fallando",
+        "configurá el bot en el grupo Humanos vs Bots",
+        "deployá el código nuevo al VPS",
+        "hacé un commit y push de los cambios",
+        "investigá por qué el handler no responde",
+        "refactorizá el módulo de astrología",
+        "fixea el bug de logout",
+        "instalá ffmpeg en el VPS",
+        "reiniciá el servicio del worker",
+        "qué pasa con el deploy",
+        "mostrame los logs del bot",
+        "abrí un PR con los cambios",
+        "agregá la tool nueva al worker",
+    ],
+    "reinsurance": [
+        "cuántas oportunidades tiene Ignacio este mes",
+        "armame el dashboard de brokers de Reamerica",
+        "qué dice la cláusula XYZ del wording",
+        "cuál es la prima emitida total de junio",
+        "listame los IBF activos del cliente",
+        "buscá la póliza del contrato 1234",
+        "cuántas cotizaciones colocadas hay",
+        "explicame quota share vs excess of loss",
+        "qué cubre el treaty de catástrofe",
+        "performance del broker Martin Romanelli",
+    ],
+    "astrology": [
+        "calculame la carta natal de Lara",
+        "qué tránsitos tengo esta semana",
+        "armame el retorno solar de este año",
+        "cuál es mi luna y mi ascendente",
+        "qué casa tiene Marte en mi natal",
+        "explicame la conjunción Venus-Júpiter",
+    ],
+    "personal": [
+        "acordate que mi cumpleaños es el 12 de marzo",
+        "guardá que prefiero respuestas cortas",
+        "qué te dije la semana pasada sobre el viaje",
+        "cuál es el email de mi hermano",
+        "anotá que tengo reunión el martes",
+    ],
+    "research": [
+        "buscá noticias sobre LATAM Airlines",
+        "qué dice el último decreto sobre seguros",
+        "investigá la regulación de fintech en Argentina",
+        "resumime el paper de embeddings de OpenAI",
+        "compará GPT-5 con Claude Opus",
+    ],
+    "conversational": [
+        "hola, qué onda",
+        "qué hora es",
+        "cómo está el clima",
+        "gracias",
+        "dale, listo",
+        "cómo te llamás",
+        "armame un PPT con la propuesta",
+        "diseñame un flyer corporativo",
+    ],
+}
 
-    Override de DISEÑO: si el texto es claramente un pedido de PPT/PDF/HTML/
-    mockup/diseño, fuerza conversational (donde el LLM bot tiene la tool
-    generar_diseno disponible). Esto evita que palabras técnicas en el brief
-    ('stack', 'arquitectura', 'pipeline') ruteen al worker de coding por
-    error."""
+# Cache de embeddings por intent (lazy, lifetime del proceso)
+_EMB_CACHE: dict[str, list] = {}     # intent → list[Float32Array]
+_EMB_DIM = 1536
+_EMB_MODEL = os.environ.get("EMBED_MODEL", "text-embedding-3-small")
+_LITELLM_URL = os.environ.get("LITELLM_URL", "http://172.17.0.1:4000")
+_LITELLM_KEY = os.environ.get("LITELLM_API_KEY", "")
+
+
+def _embed_via_litellm(texts: list[str]):
+    """Devuelve list[list[float]]. Vacío si falla."""
+    import urllib.request, json as _json
+    if not texts:
+        return []
+    try:
+        req = urllib.request.Request(
+            f"{_LITELLM_URL}/v1/embeddings",
+            data=_json.dumps({"model": _EMB_MODEL, "input": texts}).encode(),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {_LITELLM_KEY}",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as r:
+            d = _json.loads(r.read())
+        return [item["embedding"] for item in d.get("data", [])]
+    except Exception as e:
+        log.debug(f"embed via litellm fail: {e}")
+        return []
+
+
+def _ensure_examples_embedded():
+    """Idempotente — embedea los ejemplos canónicos en _EMB_CACHE si no están."""
+    if _EMB_CACHE:
+        return
+    for intent, examples in INTENT_EXAMPLES.items():
+        vecs = _embed_via_litellm(examples)
+        if vecs and len(vecs) == len(examples):
+            _EMB_CACHE[intent] = vecs
+
+
+def _cosine(a, b) -> float:
+    dot = sum(x * y for x, y in zip(a, b))
+    na = sum(x * x for x in a) ** 0.5
+    nb = sum(y * y for y in b) ** 0.5
+    if na == 0 or nb == 0:
+        return 0.0
+    return dot / (na * nb)
+
+
+def _classify_with_embeddings(text: str) -> tuple[str, float, dict]:
+    """Layer B: nearest-neighbor con embeddings.
+    Returns (intent, confidence, scores_per_intent).
+    confidence = top1_score - top2_score (margin); usar para decidir si escalar.
+    """
+    _ensure_examples_embedded()
+    if not _EMB_CACHE:
+        return "conversational", 0.0, {}
+    qvecs = _embed_via_litellm([text[:2000]])
+    if not qvecs:
+        return "conversational", 0.0, {}
+    qvec = qvecs[0]
+    scores: dict[str, float] = {}
+    for intent, vecs in _EMB_CACHE.items():
+        sims = sorted((_cosine(qvec, v) for v in vecs), reverse=True)
+        # promedio top-3 más similares — más estable que el top1
+        topk = sims[:3] or [0.0]
+        scores[intent] = sum(topk) / len(topk)
+    ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+    top1, score1 = ranked[0]
+    score2 = ranked[1][1] if len(ranked) > 1 else 0.0
+    margin = score1 - score2
+    return top1, margin, scores
+
+
+# ── LLM v2 con contexto (Layer C) ───────────────────────────────────────────────
+
+def _get_recent_history(chat_id, n=3) -> list[dict]:
+    """Lee los últimos N pares (user/assistant) del chat para dar contexto al LLM."""
+    if not chat_id:
+        return []
+    try:
+        import sqlite3
+        db_path = os.environ.get("DB_PATH", os.path.expanduser("~/data/memory.db"))
+        con = sqlite3.connect(db_path, timeout=5)
+        rows = con.execute(
+            "SELECT role, content FROM messages WHERE chat_id=? ORDER BY id DESC LIMIT ?",
+            (chat_id, n * 2),
+        ).fetchall()
+        con.close()
+        # Reverso para orden cronológico
+        return [{"role": r, "content": c[:600]} for r, c in reversed(rows)]
+    except Exception as e:
+        log.debug(f"_get_recent_history fail: {e}")
+        return []
+
+
+def _classify_with_llm_v2(text: str, chat_id=None) -> tuple[str, float]:
+    """Layer C: Haiku con últimos 3 turnos + structured-ish output.
+    Returns (intent, confidence_0_to_1)."""
+    try:
+        import os as _os
+        import anthropic
+        key = _os.environ.get("ANTHROPIC_KEY") or _os.environ.get("ANTHROPIC_API_KEY", "")
+        if not key:
+            return "conversational", 0.0
+        client = anthropic.Anthropic(api_key=key, timeout=10.0)
+        history = _get_recent_history(chat_id, n=3)
+        history_text = ""
+        if history:
+            lines = ["── HISTORIAL RECIENTE ──"]
+            for h in history:
+                role = "USER" if h["role"] == "user" else "BOT"
+                lines.append(f"[{role}] {h['content']}")
+            lines.append("── FIN HISTORIAL ──\n")
+            history_text = "\n".join(lines)
+
+        system = (
+            "Sos un clasificador de intent para un bot de Telegram. "
+            "Devolvés SOLO un JSON con dos campos: intent y confidence.\n\n"
+            "Intents disponibles:\n"
+            "- coding: pide modificar código/bot/handler/tool, deploy, push, refactor, debug, devops\n"
+            "- reinsurance: pregunta CRM Salesforce, accounts, oportunidades, primas, brokers, IBF, Reamerica\n"
+            "- astrology: carta natal, tránsitos, planetas, signos, retornos, ascendente\n"
+            "- personal: recordar/guardar preferencias, historial, datos del usuario\n"
+            "- research: buscar/investigar/resumir info externa, web, noticias, papers\n"
+            "- conversational: charla general, saludos, confirmaciones, clima, hora, diseño, PPT\n\n"
+            "REGLAS:\n"
+            "1. Si el HISTORIAL muestra que el bot acaba de hacer una pregunta confirmable "
+            "y el USER actual es una confirmación corta (sí/dale/configuralo/mandásela), "
+            "el intent es el que la pregunta del bot estaba proponiendo (típicamente coding).\n"
+            "2. confidence es 0-1: 1 = clarísimo, 0.5 = dudoso, <0.4 = NO sé (devolvé conversational).\n\n"
+            "Formato de respuesta (JSON estricto, sin texto extra):\n"
+            '{"intent": "coding", "confidence": 0.92}'
+        )
+
+        resp = client.messages.create(
+            model="claude-haiku-4-5",
+            max_tokens=80,
+            system=system,
+            messages=[{
+                "role": "user",
+                "content": f"{history_text}\n[USER ACTUAL] {text[:800]}",
+            }],
+        )
+        raw = ""
+        for block in resp.content:
+            if hasattr(block, "text"):
+                raw += block.text
+        raw = raw.strip()
+        # Parsear JSON tolerante
+        import json as _json, re as _re
+        m = _re.search(r"\{[^}]+\}", raw)
+        if not m:
+            return "conversational", 0.0
+        data = _json.loads(m.group(0))
+        intent = str(data.get("intent", "conversational")).strip().lower()
+        conf = float(data.get("confidence", 0.5))
+        valid = {"coding", "reinsurance", "astrology", "personal", "research", "conversational"}
+        if intent not in valid:
+            return "conversational", 0.0
+        log.info(f"llm_v2: {intent!r} conf={conf:.2f} for {text[:60]!r}")
+        return intent, conf
+    except Exception as e:
+        log.debug(f"llm_v2 fail: {e}")
+        return "conversational", 0.0
+
+
+# ── Clasificador unificado (todas las capas) ────────────────────────────────────
+
+def classify(text: str, use_llm_fallback: bool = True, chat_id=None) -> str:
+    """Intent Router v2 — pipeline de 4 capas (Layer 0 vive en handle_message):
+       Layer 1: regex keyword + design override (instantáneo)
+       Layer 2: embeddings nearest-neighbor (~50ms, ~$0.00001)
+       Layer 3: LLM Haiku con contexto del chat (~1s, ~$0.001)
+    Cada capa loguea su decisión en intent_log para diagnóstico (Layer D).
+    """
+    import time as _t
+    t0 = _t.time()
     t = text.lower()
 
-    # Override de diseño — alta prioridad, antes del scoring de coding
+    # ── Layer 1.A: Override de diseño ──
     for pat in _DESIGN_INTENT_PATTERNS:
         if re.search(pat, t):
-            log.info(f"intent: design override → conversational (matched {pat[:40]!r})")
+            _log_layer(chat_id, text, "conversational", "design_override",
+                       confidence=1.0, ms=int((_t.time()-t0)*1000),
+                       meta={"matched_pattern": pat[:40]})
             return "conversational"
 
+    # ── Layer 1.B: Keyword regex con scoring ──
     scores = {intent: 0 for intent in _PRIORITY}
     for intent, patterns in _PATTERNS.items():
         if intent not in scores:
@@ -218,28 +456,70 @@ def classify(text: str, use_llm_fallback: bool = True) -> str:
         for p in patterns:
             if re.search(p, t):
                 scores[intent] += 1
-
     best = max(scores, key=scores.get)
-    result = best if scores[best] > 0 else "conversational"
+    keyword_result = best if scores[best] > 0 else "conversational"
+    keyword_score = scores[best]
 
-    # Fallback LLM: si hay señales de ambigüedad (verbo + objeto genérico como
-    # "menú/botón/comando" que puede ser del bot O de astrología O de Reamerica),
-    # escalamos a Haiku 4.5 para que decida con contexto semántico — NO importa
-    # si el keyword dijo coding o conversational; queremos la verdad, no la
-    # primera respuesta de regex.
-    # No escalamos: texto corto (<15 chars) o intents específicos confiables
-    # (reinsurance/astrology/personal) con score alto.
-    if (use_llm_fallback
-            and len(text.strip()) >= 15
-            and _has_ambiguity(t)
-            and not (result in ("reinsurance", "astrology", "personal") and scores[result] >= 2)):
-        llm_result = _classify_with_llm(text)
-        if llm_result != result:
-            log.info(f"intent: keyword={result!r} → llm={llm_result!r} for {text[:60]!r}")
-        result = llm_result
+    # Si el regex dio un intent específico con alta confianza, return directo.
+    # Específicos = reinsurance/astrology/personal con ≥2 matches.
+    if keyword_result in ("reinsurance", "astrology", "personal") and keyword_score >= 2:
+        _log_layer(chat_id, text, keyword_result, "keyword_strong",
+                   confidence=min(1.0, keyword_score / 3),
+                   ms=int((_t.time()-t0)*1000), meta={"score": keyword_score})
+        return keyword_result
 
-    log.debug(f"Intent '{result}' para: {text[:60]}")
-    return result
+    # Texto muy corto → confiar en keyword o conversational, sin gastar APIs.
+    if len(text.strip()) < 15:
+        _log_layer(chat_id, text, keyword_result, "keyword_short",
+                   confidence=0.6 if keyword_score > 0 else 0.4,
+                   ms=int((_t.time()-t0)*1000), meta={"score": keyword_score})
+        return keyword_result
+
+    # ── Layer 2: Embeddings ──
+    if use_llm_fallback:
+        emb_intent, emb_margin, emb_scores = _classify_with_embeddings(text)
+        # margin > 0.05 = decisión clara (top1 separa bien del top2)
+        if emb_margin >= 0.05:
+            # Si keyword y embedding coinciden → muy confiable
+            if emb_intent == keyword_result and keyword_score > 0:
+                _log_layer(chat_id, text, emb_intent, "embed_consensus",
+                           confidence=min(1.0, 0.7 + emb_margin),
+                           ms=int((_t.time()-t0)*1000),
+                           meta={"margin": round(emb_margin, 4), "kw": keyword_result})
+                return emb_intent
+            # Si discrepan pero embedding tiene buen margin, embedding gana
+            _log_layer(chat_id, text, emb_intent, "embed_wins",
+                       confidence=min(1.0, 0.6 + emb_margin),
+                       ms=int((_t.time()-t0)*1000),
+                       meta={"margin": round(emb_margin, 4), "kw": keyword_result})
+            return emb_intent
+
+        # ── Layer 3: LLM con contexto si embeddings no se decide claramente ──
+        llm_intent, llm_conf = _classify_with_llm_v2(text, chat_id=chat_id)
+        if llm_conf >= 0.4:
+            _log_layer(chat_id, text, llm_intent, "llm_v2",
+                       confidence=llm_conf, ms=int((_t.time()-t0)*1000),
+                       meta={"emb_top": emb_intent, "emb_margin": round(emb_margin, 4),
+                             "kw": keyword_result})
+            return llm_intent
+
+    # Fallback final: lo que dijo regex (o conversational)
+    _log_layer(chat_id, text, keyword_result, "fallback",
+               confidence=0.4, ms=int((_t.time()-t0)*1000),
+               meta={"score": keyword_score})
+    return keyword_result
+
+
+def _log_layer(chat_id, text, intent, layer, confidence, ms, meta=None):
+    """Telemetría centralizada — Layer D."""
+    log.info(f"intent[{layer}] → {intent!r} conf={confidence:.2f} ({ms}ms) for {text[:50]!r}")
+    try:
+        from services.intent_state import log_classification
+        log_classification(chat_id, text, intent, layer=layer,
+                           confidence=confidence, duration_ms=ms,
+                           metadata=meta)
+    except Exception:
+        pass
 
 
 def classify_complexity(text: str) -> str:

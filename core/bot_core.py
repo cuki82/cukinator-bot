@@ -1679,6 +1679,25 @@ PROTOCOLO ANTE INSTRUCCIÓN OPERATIVA:
 REGLA DE ORO: Si algo puede ejecutarse con las tools disponibles, EJECUTALO. No expliques cómo hacerlo. Hacelo.
 Solo pedí confirmación si: vas a sobreescribir algo crítico, hay ambigüedad seria, o falta una credencial.
 
+PROTOCOLO PENDING — CRÍTICO PARA EVITAR ALUCINACIONES DE COMPROMISO:
+Cuando NO podés ejecutar algo en este mismo turno (porque te falta info, o porque el user solo está preguntando "¿podés hacer X?"), JAMÁS digas "ya está, lo mandé al worker" o "ya lo anoté" — eso es una alucinación porque no tenés ninguna cola de tareas. En cambio:
+1. Preguntá lo que falta explícitamente, O confirmá si querés ejecutar.
+2. Al final de tu mensaje, agregá un tag invisible al user con el formato:
+       [PENDING:<intent>:<acción concreta a ejecutar si el user confirma>]
+   Donde <intent> es uno de: coding, astrology, reinsurance, research, personal, conversational
+   Y <acción> es la frase ejecutable que después se le pasa al worker/handler como si el user la hubiera escrito.
+3. El sistema borra ese tag antes de mostrarte al user. Si el user responde con confirmación corta ("sí", "dale", "configuralo", "mandásela", "ok"), el sistema toma la acción del tag y la ejecuta como intent correcto — vos no tenés que volver a confirmar ni reprocesar.
+
+EJEMPLOS DEL TAG:
+- User: "¿podés agregar un endpoint /ping al bot?"
+  Vos: "¿Lo armo en el bot ahora? [PENDING:coding:agregá un endpoint GET /ping al bot que devuelva pong]"
+- User: "configurá el bot en el grupo Humanos vs Bots"
+  Vos: "Dale, configuro la whitelist y el filtro de grupo. ¿Avanzo? [PENDING:coding:configurá soporte de grupo Humanos vs Bots: whitelist group_id, filtro de menciones, restricción de tools a calcular_carta_natal]"
+- User: "calculame la carta de Lara"
+  Vos: "Dame fecha (DD/MM/AAAA), hora (HH:MM) y lugar de Lara. [PENDING:astrology:calcular carta natal de Lara con datos que va a pasar el user]"
+
+NUNCA inventes que ya hiciste algo si no llamaste una tool. NUNCA digas "lo mandé al worker" si tu próxima acción no fue una tool real. Si hay duda, preguntá + emití el tag.
+
 CAPACIDADES OPERATIVAS BÁSICAS:
 - config_guardar / config_leer / config_listar → persiste configuración en Railway DB
 - agent_guardar_secret → guarda API keys y credenciales de forma segura
@@ -1894,6 +1913,11 @@ def _system_parts(intent: str, is_owner: bool) -> tuple:
     return _SYS_CORE, "\n\n".join(domain)
 
 
+def _is_group_chat_id(chat_id) -> bool:
+    """En Telegram, los chats de grupos SIEMPRE tienen chat_id negativo."""
+    return chat_id is not None and chat_id < 0
+
+
 def get_system_prompt(user_name: str = None, chat_id: int = None,
                       intent: str = "conversational") -> str:
     """Compone el system prompt según intent (Capa 3 reducción tokens).
@@ -1942,6 +1966,15 @@ def get_system_prompt(user_name: str = None, chat_id: int = None,
                 prompt += f"\n\n━━━ IDENTIDAD DEL TENANT ({tenant_slug}) ━━━\n{tcfg['system_prompt']}"
         except Exception as _tpe:
             log.debug(f"tenant prompt skip: {_tpe}")
+
+    # Modo grupo: append SIEMPRE al final para que sea lo último que vea el LLM
+    # — y prevalezca sobre cualquier otra instrucción del CORE/tenant.
+    if _is_group_chat_id(chat_id):
+        try:
+            from services.group_acl import group_system_suffix
+            prompt += group_system_suffix()
+        except Exception as _ge:
+            log.warning(f"group system suffix fail: {_ge}")
 
     return prompt
 
@@ -2044,6 +2077,16 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
         and (t["name"] not in INTENT_GATED_TOOLS or _intent_pre in INTENT_GATED_TOOLS[t["name"]])
     ]
 
+    # ── Restricción TOTAL si estamos en un grupo de Telegram ───────────
+    # En grupos, el ACL deja solo cálculo astrológico inline (sin DB).
+    # Detección por chat_id < 0 (grupos en TG siempre son negativos).
+    _is_group = chat_id < 0
+    if _is_group:
+        from services.group_acl import filter_tools_for_group
+        tools_activos = filter_tools_for_group(tools_activos)
+        log.info(f"[{chat_id}] modo grupo — tools reducidas a {len(tools_activos)}: "
+                 f"{[t['name'] for t in tools_activos]}")
+
     # Límite dinámico según complejidad del mensaje
     DEV_KEYWORDS = ["skill", "módulo", "modulo", "código", "codigo", "función", "funcion",
                     "implementá", "implementa", "creá", "crea", "agregá", "agrega",
@@ -2104,7 +2147,11 @@ def ask_claude(chat_id: int, user_text: str, user_name: str = None, allow_voice:
     }
 
     def _trace_footer() -> str:
-        """Footer humano con from/to, modelo, latencia y tokens si BOT_TRACE=true."""
+        """Footer humano con from/to, modelo, latencia y tokens si BOT_TRACE=true.
+        Skipeado en grupos (chat_id<0): el grupo no tiene que ver telemetría
+        del bot, queda más limpio."""
+        if _is_group_chat_id(chat_id):
+            return ""
         if os.environ.get("BOT_TRACE", "").lower() not in ("true", "1"):
             return ""
         elapsed = time.time() - _started_at
@@ -3612,10 +3659,32 @@ async def _advance_astro_retorno(update: Update, context: ContextTypes.DEFAULT_T
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     import asyncio, io, threading, queue  # time ya está importado al top-level
-    chat_id  = update.effective_chat.id
+    chat_id    = update.effective_chat.id
+    chat_type  = update.effective_chat.type   # private | group | supergroup | channel
+    chat_title = update.effective_chat.title  # None en privados
     user_msg = update.message.text
     name     = update.effective_user.first_name or "Usuario"
     msg_id   = update.message.message_id
+
+    # ── Group ACL ─────────────────────────────────────────────────────
+    # Si el chat es grupo/supergrupo, aplicar whitelist. Si no está en
+    # whitelist → silencio total (no consume tokens). Si está → ADEMÁS
+    # filtrar por mención/reply (admin lee todo el grupo pero solo contesta
+    # cuando lo invocan).
+    from services.group_acl import (
+        is_group_chat_type, is_allowed_group, is_directed_to_bot,
+    )
+    is_group_chat = is_group_chat_type(chat_type)
+    if is_group_chat:
+        if not is_allowed_group(chat_id):
+            log.info(f"[{chat_id}] grupo NO whitelisted ({chat_title!r}, type={chat_type}) — ignorando msg de {name}")
+            return
+        if not is_directed_to_bot(update):
+            log.info(f"[{chat_id}] grupo whitelisted pero msg NO dirigido al bot ({chat_title!r}) — ignorando msg de {name}: {user_msg[:50]!r}")
+            return
+        log.info(f"[{chat_id}] grupo whitelisted + dirigido al bot ({chat_title!r}) — procesando msg de {name}")
+    # Stash del flag para que ask_claude lo lea
+    context.user_data["_is_group_chat"] = is_group_chat
 
     # Deduplicación — ignorar si ya procesamos este mensaje
     if not hasattr(context.application, "_processed_ids"):
@@ -4484,6 +4553,24 @@ BOT_VERSION = "v2026.04.13-novoz"
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name = update.effective_user.first_name or ""
+    chat = update.effective_chat
+    # Log explícito del chat_id + tipo + título
+    log.info(f"[cmd_start] CHAT_INFO type={chat.type} id={chat.id} title={chat.title!r} from={name}")
+    if chat.type in ("group", "supergroup"):
+        from services.group_acl import is_allowed_group
+        if not is_allowed_group(chat.id):
+            await update.message.reply_text(
+                f"Hola {name}, este grupo todavía no está habilitado. "
+                f"Pasale al admin este ID: `{chat.id}`",
+                parse_mode="Markdown",
+            )
+            return
+        await update.message.reply_text(
+            f"Hola {name}, soy Cukinator. En este grupo puedo calcular cartas "
+            f"natales si me pasás fecha (DD/MM/AAAA), hora (HH:MM) y lugar. "
+            f"Mencioname con @CukinatorBot."
+        )
+        return
     await update.message.reply_text(
         f"Hola {name}! Soy Cukinator {BOT_VERSION}. "
         f"Puedo conversar, buscar en internet y calcular cartas natales. "

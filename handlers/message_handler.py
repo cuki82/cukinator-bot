@@ -491,9 +491,31 @@ async def _handle_credential_paste(update, _context, user_msg: str) -> bool:
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     import asyncio, io, threading, queue
-    chat_id  = update.effective_chat.id
+    chat_id    = update.effective_chat.id
+    chat_type  = update.effective_chat.type
+    chat_title = update.effective_chat.title
     user_msg = update.message.text
     name     = update.effective_user.first_name or "Usuario"
+
+    # ── Group ACL ─────────────────────────────────────────────────────
+    # Whitelist de grupos + filtro mention/reply/nick. Sin esto, el bot
+    # contesta TODOS los mensajes del grupo cuando es admin (lee todo).
+    # ADEMÁS: SIEMPRE acumulamos el msg al buffer de contexto del grupo
+    # (incluso si vamos a ignorar), para que cuando el bot SÍ responda
+    # tenga la conversación previa entre humanos como contexto y resuelva
+    # referencias ("ella", "ese", nombres, etc.).
+    from services.group_acl import is_group_chat_type, is_allowed_group, is_directed_to_bot
+    from services.group_context import append_message as _gctx_append
+    is_group_chat = is_group_chat_type(chat_type)
+    if is_group_chat:
+        if not is_allowed_group(chat_id):
+            log.info(f"[{chat_id}] grupo NO whitelisted ({chat_title!r}) — ignorando msg de {name}")
+            return
+        # Acumulamos al buffer SIEMPRE (sea para nosotros o entre humanos)
+        _gctx_append(chat_id, name, user_msg or "")
+        if not is_directed_to_bot(update):
+            log.info(f"[{chat_id}] grupo whitelisted pero msg NO dirigido al bot ({chat_title!r}) — ignorando msg de {name}: {user_msg[:50]!r}")
+            return
 
     # Detección de credenciales — DEBE ir antes del log para evitar filtrar la
     # key en journalctl. Si se detecta key, el handler escribe al vault, responde
@@ -517,10 +539,33 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
-    # Context-aware routing: si el bot en su último mensaje estaba pidiendo datos
-    # de nacimiento (fecha/hora/lugar), el follow-up con esos datos se clasifica
-    # como astrology aunque el intent router keyword-based lo diera conversational.
-    classified = _classify_intent(user_msg)
+    # ── Intent Router v2 · Layer 0: pending action confirmation ──
+    # Si el turno anterior dejó una acción pendiente Y este mensaje es una
+    # confirmación corta ("sí", "dale", "mandásela"), heredamos ese intent
+    # y reescribimos el user_msg con la acción guardada — para que el worker
+    # reciba contexto real, NO el "sí, mandásela" suelto.
+    try:
+        from services.intent_state import resolve_with_pending, clear_pending, log_classification
+        _pending = resolve_with_pending(chat_id, user_msg)
+    except Exception as _ipe:
+        log.debug(f"intent_state import fail: {_ipe}")
+        _pending = None
+    if _pending:
+        log.info(f"[{chat_id}] PENDING confirmation matched: intent={_pending.intent} action={_pending.action[:60]!r}")
+        try:
+            log_classification(chat_id, user_msg, _pending.intent, layer="pending",
+                               confidence=1.0, metadata={"action": _pending.action})
+        except Exception:
+            pass
+        # Reescribir el user_msg para que el handler downstream reciba la acción real
+        user_msg = _pending.action
+        classified = _pending.intent
+        clear_pending(chat_id)
+    else:
+        # Context-aware routing: si el bot en su último mensaje estaba pidiendo datos
+        # de nacimiento (fecha/hora/lugar), el follow-up con esos datos se clasifica
+        # como astrology aunque el intent router keyword-based lo diera conversational.
+        classified = _classify_intent(user_msg)
     try:
         import re as _re_ctx
         import sqlite3 as _sl
@@ -578,7 +623,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             result = await send_coding_task(user_msg, chat_id)
             reply_text = format_worker_result(result)
-            if os.environ.get("BOT_TRACE", "").lower() in ("true", "1"):
+            if os.environ.get("BOT_TRACE", "").lower() in ("true", "1") and chat_id > 0:
                 elapsed = result.get("duration_s") or result.get("elapsed_seconds") or result.get("duration") or "?"
                 status  = result.get("status", "?")
                 modified = result.get("modified_files") or []
@@ -606,6 +651,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"Error con el Agent Worker: {e}")
         return
 
+    # ── En grupos, prefixear el user_msg con [Nombre] e inyectar contexto ──
+    # del buffer del grupo. Esto resuelve dos bugs:
+    #   1. Bot le decía "H" a Cuki / mezclaba nombres porque no sabía quién
+    #      había escrito qué (el history pone role:user sin sender_name).
+    #   2. Bot perdía contexto de la charla previa entre humanos.
+    user_msg_for_claude = user_msg
+    if is_group_chat:
+        try:
+            from services.group_context import get_context as _gctx
+            _ctx = _gctx(chat_id, exclude_last=True)
+        except Exception:
+            _ctx = ""
+        # Prefijo del sender + contexto del grupo previo. El system prompt
+        # de grupo (group_acl.group_system_suffix) tiene la regla para
+        # llamar al user por el nombre del prefijo.
+        if _ctx:
+            user_msg_for_claude = f"{_ctx}\n[{name}] {user_msg}"
+        else:
+            user_msg_for_claude = f"[{name}] {user_msg}"
+
     try:
         q = queue.Queue()
 
@@ -614,7 +679,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pidio_voz = any(w in user_msg.lower() for w in
                     ["voz", "audio", "escuchar", "hablame", "háblame",
                      "respondé con voz", "responde con voz", "mandame un audio", "en audio"])
-                q.put(("ok", ask_claude(chat_id, user_msg, user_name=name, allow_voice=pidio_voz)))
+                q.put(("ok", ask_claude(chat_id, user_msg_for_claude, user_name=name, allow_voice=pidio_voz)))
             except Exception as e:
                 q.put(("err", str(e)))
 
@@ -650,6 +715,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             raise Exception(payload)
 
         reply, pdf_path, extra_files = payload
+
+        # ── Intent Router v2 · Layer 0: parsear tag [PENDING:intent:action] ──
+        # Si el LLM emitió el tag, lo extraemos del reply (no se le muestra al
+        # user) y guardamos la acción pendiente. Si el siguiente mensaje del
+        # user es una confirmación corta, resolve_with_pending la hereda.
+        try:
+            from services.intent_state import extract_pending_tag, remember_pending
+            reply, _tag = extract_pending_tag(reply)
+            if _tag:
+                _intent, _action = _tag
+                remember_pending(chat_id, _intent, _action)
+                log.info(f"[{chat_id}] PENDING tag emitido por LLM: intent={_intent} action={_action[:60]!r}")
+        except Exception as _ie:
+            log.debug(f"PENDING tag parse skip: {_ie}")
+
         save_message_full(chat_id, "user",      user_msg, db_path=DB_PATH)
         save_message_full(chat_id, "assistant", reply,    db_path=DB_PATH)
 
@@ -703,8 +783,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     import asyncio, io, tempfile, subprocess, threading, queue, sys
-    chat_id = update.effective_chat.id
-    name    = update.effective_user.first_name or "Usuario"
+    chat_id    = update.effective_chat.id
+    chat_type  = update.effective_chat.type
+    chat_title = update.effective_chat.title
+    name       = update.effective_user.first_name or "Usuario"
+
+    # Group ACL — mismo filtro que handle_message para no consumir tokens en
+    # grupos no whitelisted (Whisper transcribe + Claude respuesta = caro).
+    # Para audios: en grupos solo procesar si es REPLY a un mensaje del bot
+    # (no se puede "mencionar" en un audio).
+    from services.group_acl import is_group_chat_type, is_allowed_group, is_directed_to_bot
+    if is_group_chat_type(chat_type):
+        if not is_allowed_group(chat_id):
+            log.info(f"[{chat_id}] AUDIO en grupo NO whitelisted ({chat_title!r}) — ignorando")
+            return
+        if not is_directed_to_bot(update):
+            log.info(f"[{chat_id}] AUDIO en grupo no dirigido al bot ({chat_title!r}) — ignorando (hace reply al bot para hablarle por audio)")
+            return
 
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
@@ -749,20 +844,20 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log.info(f"[{chat_id}] Transcripcion: {texto}")
         await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
-        # Detectar si el usuario pidió explicitamente respuesta en audio.
-        # Default: audio in -> texto out. Solo si hay una frase explícita
-        # tipo "respondeme con audio", "hablame", etc., activamos la voz.
+        # Comportamiento default: si el user mandó audio, respondemos con
+        # audio (con la voz clonada COCOBASILE). Solo si pide explícito que
+        # le respondan en texto, lo respetamos.
         import re as _re
-        _VOICE_REQUEST_PATTERNS = [
-            r"\brespond[eé]me (?:con|en) (?:un )?(?:audio|voz)\b",
-            r"\bcontest[aá]me (?:con|en) (?:un )?(?:audio|voz)\b",
-            r"\bmand[aá]me (?:un )?(?:audio|voz)\b",
-            r"\b(?:respond[eé]|contest[aá]) (?:con|en) (?:audio|voz)\b",
-            r"\bhabl[aá]me\b", r"\bescuch[aá]me\b",
-            r"\ben audio\b", r"\bcon voz\b",
+        _TEXT_REQUEST_PATTERNS = [
+            r"\brespond[eé]me (?:con|en) (?:un )?(?:texto|escrito)\b",
+            r"\bcontest[aá]me (?:con|en) (?:un )?(?:texto|escrito)\b",
+            r"\b(?:respond[eé]|contest[aá]) (?:con|en) (?:texto|escrito)\b",
+            r"\bsin (?:audio|voz)\b", r"\bs[oó]lo texto\b", r"\bsolo texto\b",
+            r"\bescrib[ií]me\b",
         ]
-        _pidio_audio = any(_re.search(p, (texto or "").lower()) for p in _VOICE_REQUEST_PATTERNS)
-        log.info(f"[{chat_id}] pidio_audio={_pidio_audio}")
+        _pidio_texto = any(_re.search(p, (texto or "").lower()) for p in _TEXT_REQUEST_PATTERNS)
+        _pidio_audio = not _pidio_texto   # audio in → audio out (default)
+        log.info(f"[{chat_id}] pidio_audio={_pidio_audio} (pidio_texto_explicito={_pidio_texto})")
 
         q = queue.Queue()
 
